@@ -19,11 +19,11 @@ namespace MCGalaxy
     public class ActivityBot : Plugin
     {
         /* READ AND EDIT THESE */
-        const string CHANNEL_ID = "878703362143567883";      // FILL THIS IN
-        const string ROLE_ID = "878737467866509383";           // FILL THIS IN
+        const string CHANNEL_ID = "";      // FILL THIS IN
+        const string ROLE_ID = "";         // FILL THIS IN
         const int HEARTBEAT_TIME = 60;     // Default checks playerbase every 60 seconds (seconds!)
         const int IDLE_TIME = 180;         // Default waiting time before pinging again every 180 minutes (minutes!)
-        const int THRESHOLD_PLAYERS = 20;   // Minimum threshold # players to trigger the Discord bot
+        const int THRESHOLD_PLAYERS = 20;  // Minimum threshold # players to trigger the Discord bot
 
 
 
