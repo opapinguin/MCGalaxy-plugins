@@ -115,7 +115,7 @@ namespace MCGalaxy
                 }
                 catch (Exception e)
                 {
-                    Logger.Log(LogType.Debug, String.Format("Error writing to {saveFilePath}.txt. ERROR: {0}", e.StackTrace));
+                    Logger.Log(LogType.Debug, String.Format("Error writing to {0}.txt. ERROR: {1}", saveFilePath, e.StackTrace));
                 }
             }
         }
@@ -133,7 +133,7 @@ namespace MCGalaxy
             }
             catch (Exception e)
             {
-                Logger.Log(LogType.Debug, String.Format("Error reading from {saveFilePath}.txt. ERROR: {0}", e.StackTrace));
+                Logger.Log(LogType.Debug, String.Format("Error reading from {0}.txt. ERROR: {1}", saveFilePath, e.StackTrace));
             }
             return DateTime.Parse(line);
         }
