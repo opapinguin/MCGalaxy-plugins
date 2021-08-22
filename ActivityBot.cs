@@ -99,8 +99,8 @@ namespace MCGalaxy
         public void EmbedPing(DiscordBot disc, string channelID)
         {
             string msg = String.Format("There are {0} players online! <@&{1}> ", PlayerInfo.Online.Items.Length, ROLE_ID);
-            ChannelSendMessage test = new ChannelSendMessage(channelID, msg);
-            disc.Send(test);
+            ChannelSendMessage basicEmbed = new ChannelSendMessage(channelID, msg);
+            disc.Send(basicEmbed);
         }
 
         // Updates the lastActivityPing.txt file (not proud of that name)
