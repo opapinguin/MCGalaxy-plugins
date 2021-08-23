@@ -6,6 +6,10 @@
  * 
  * BEFORE USING THIS PLUGIN:
  * To set up your own Discord bot for your own server see https://github.com/UnknownShadow200/MCGalaxy/wiki/Discord-relay-bot
+ *
+ * OTHER NOTES:
+ * We can't use a "rich embed" (the fancy one with titles and all that) because for some reason
+ * Discord won't make mentions actually ping within rich embeds. So we send a simple message
  */
 
 using System;
@@ -35,7 +39,7 @@ namespace MCGalaxy
         SchedulerTask task;
 
         public override string creator { get { return "Opapinguin"; } }
-        public override string MCGalaxy_Version { get { return Server.Version; } }
+        public override string MCGalaxy_Version { get { return "1.9.3.4"; } } // Highly recommend 1.9.3 or higher
         public override string name { get { return "ActivityBot"; } }
 
         public override void Load(bool startup)
@@ -67,7 +71,7 @@ namespace MCGalaxy
                 Logger.Log(LogType.SystemActivity, String.Format("Failed to Discord ping the activity bot. ERROR: {0}", e.StackTrace));
             }
 
-            UpdateLastPing(saveFilePath);
+            UpdateLastPing(saveFilePath, DateTime.UtcNow);
         }
 
         // HELPER FUNCTIONS
@@ -78,7 +82,8 @@ namespace MCGalaxy
             {
                 File.Create(path).Close();
                 Logger.Log(LogType.SystemActivity, "CREATED NEW: " + path);
-                UpdateLastPing(path);
+                // Why subtract the idle time below? Because if we didn't the plugin wouldn't think to ping for IDLE_TIME minutes when loaded for the first time
+                UpdateLastPing(saveFilePath, DateTime.UtcNow.AddMinutes(-IDLE_TIME));
             }
         }
 
@@ -98,19 +103,22 @@ namespace MCGalaxy
         // Does the pinging
         public void EmbedPing(DiscordBot disc, string channelID)
         {
-            string msg = String.Format("There are {0} players online! <@&{1}> ", PlayerInfo.Online.Items.Length, ROLE_ID);
+            Int32 unixTimestamp = (Int32)(DateTime.UtcNow.Subtract(new DateTime(1970, 1, 1))).TotalSeconds; // Thank you "bizzehdee" on stackexchange
+            string msg = String.Format("There are {0} players online! <@&{1}>\n" +
+                                        "Sent <t:{2}> local time\n" +
+                                        "_ _ _ _ _ _ _ _ _ _", PlayerInfo.Online.Items.Length, ROLE_ID, unixTimestamp);
             ChannelSendMessage basicEmbed = new ChannelSendMessage(channelID, msg);
             disc.Send(basicEmbed);
         }
 
         // Updates the lastActivityPing.txt file (not proud of that name)
-        private void UpdateLastPing(string path)
+        private void UpdateLastPing(string path, DateTime time)
         {
             lock (updateLock)
             {
                 try
                 {
-                    string[] input = { DateTime.UtcNow.ToString() };   // Bit hacky, but just writes last ping time into the text file
+                    string[] input = { time.ToString() };   // Bit hacky, but just writes last ping time into the text file
                     File.WriteAllLines(path, input);
                 }
                 catch (Exception e)
