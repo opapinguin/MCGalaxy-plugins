@@ -78,7 +78,7 @@ namespace MCGalaxy
             {
                 File.Create(path).Close();
                 Logger.Log(LogType.SystemActivity, "CREATED NEW: " + path);
-                UpdateLastPing(saveFilePath);
+                UpdateLastPing(path);
             }
         }
 
