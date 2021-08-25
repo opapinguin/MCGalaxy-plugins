@@ -59,7 +59,7 @@ namespace MCGalaxy
             lastPing = ReadLastPing(saveFilePath);
 
             // Skip the rest if too few players or too recent ping
-            if (!ShouldBotPing()) return;
+            if (!ShouldBotPing(lastPing)) return;
 
             DiscordBot discBot = DiscordPlugin.Bot;
             try
@@ -68,7 +68,7 @@ namespace MCGalaxy
             }
             catch (Exception e)
             {
-                Logger.Log(LogType.SystemActivity, String.Format("Failed to Discord ping the activity bot. ERROR: {0}", e.StackTrace));
+                Logger.Log(LogType.Debug, String.Format("Failed to Discord ping the activity bot. ERROR: {0}", e.StackTrace));
             }
 
             UpdateLastPing(saveFilePath, DateTime.UtcNow);
@@ -88,7 +88,7 @@ namespace MCGalaxy
         }
 
         // Test if bot should ping
-        private bool ShouldBotPing()
+        private bool ShouldBotPing(DateTime lastPing)
         {
             // Are enough players online to trigger the bot?
             int players_online = PlayerInfo.Online.Items.Length;
