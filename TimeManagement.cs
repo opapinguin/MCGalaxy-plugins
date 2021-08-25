@@ -43,8 +43,8 @@ namespace MCGalaxy
             TMTable = PlayerExtList.Load("extra/timeManagementTable");
             playerTMSettings = PlayerExtList.Load("extra/playerTMSettings");
             task = Server.MainScheduler.QueueRepeat(TMCallback, null, TimeSpan.FromSeconds(HEARTBEAT_TM));
-            OnPlayerConnectEvent.Register(HandlePlayerConnect, Priority.High);
-            OnPlayerDisconnectEvent.Register(HandlePlayerDisconnect, Priority.High);
+            OnPlayerConnectEvent.Register(HandlePlayerConnect, Priority.Low);
+            OnPlayerDisconnectEvent.Register(HandlePlayerDisconnect, Priority.Low);
         }
 
         public override void Unload(bool shutdown)
