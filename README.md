@@ -1,5 +1,5 @@
 # MCGalaxy-plugins
-Plugins for ClassiCube's server software MCGalaxy
+Plugins for ClassiCube's server software MCGalaxy. Simple and well-documented code for those who want to learn more about MCGalaxy.
 
 <b>Activity Bot:</b>
 A bot that mentions (pings) a Discord role if there's a certain number of players online
