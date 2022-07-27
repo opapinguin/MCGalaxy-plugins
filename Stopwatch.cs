@@ -4,6 +4,11 @@
  * Special thanks to Venk's stopwatch plugin, on which this was based
  * 
  * Made for Pascalos' zombie survival server. Derived from Upsurge's stopwatch
+ *
+ * You use this by creating message blocks which start/stop the stopwatch with
+ * /mb air [START SECRET CODE]
+ * or
+ * /mb air /stopwatch [STOP SECRET CODE]
  */
 
 
