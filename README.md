@@ -9,3 +9,6 @@ A plugin that periodically reminds players (who want it) how long they've been p
 
 <b>Teamchat:</b>
 Implements the /teamchat command
+
+<b>Stopwatch:</b>
+A stopwatch plugin, based on Venk's own stopwatch
