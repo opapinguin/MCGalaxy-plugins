@@ -4,11 +4,11 @@
  * Special thanks to Venk's stopwatch plugin, on which this was based
  * 
  * Made for Pascalos' zombie survival server. Derived from Upsurge's stopwatch
- *
- * You use this by creating message blocks which start/stop the stopwatch with
- * /mb air [START SECRET CODE]
+ * 
+ * You use this by creating message blocks which start/stop the stopwatch with e.g.,
+ * "/mb air /stopwatch [START SECRET CODE]"
  * or
- * /mb air /stopwatch [STOP SECRET CODE]
+ * "/mb air /stopwatch [STOP SECRET CODE]"
  */
 
 
@@ -69,8 +69,14 @@ namespace MCGalaxy
             {
                 if (p.Extras.GetBoolean("timerOn", false))
                 {
+                    TimeSpan interval = ((Stopwatch)p.Extras["stopwatch"]).getTime();
                     p.Extras["timerOn"] = false;
                     ((Stopwatch)p.Extras["stopwatch"]).StopTimer();
+                    p.Message(String.Format("&eTotal Time: &c{0}",
+                    interval.ToString(Stopwatch.format)
+                    .TrimStart('0')
+                    .TrimStart(':')
+                    .Replace('.', ':')));
                 }
             }
         }
@@ -83,7 +89,7 @@ namespace MCGalaxy
 
     public class Stopwatch
     {
-        string format = @"mm\:ss\.ff";
+        public static string format = @"mm\:ss\.ff";
         private System.Timers.Timer aTimer;
         DateTime startTime;
         Player p;
@@ -211,6 +217,12 @@ namespace MCGalaxy
                 aTimer.Dispose();
             }
             p.SendCpeMessage(CpeMessageType.BottomRight2, "");
+        }
+
+        public TimeSpan getTime()
+        {
+            TimeSpan interval = DateTime.Now - this.startTime;
+            return interval;
         }
 
         ~Stopwatch()
