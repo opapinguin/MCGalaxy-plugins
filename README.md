@@ -4,9 +4,6 @@ Plugins for ClassiCube's server software MCGalaxy. Simple and verbose code for t
 <b>Activity Bot:</b>
 A bot that (periodically) mentions (pings) a Discord role if there's a threshold number of players online
 
-<b>Time Management (UNFINISHED):</b>
-A plugin that periodically reminds players (who want it) how long they've been playing in the last 24 hours OR since their last login. Introduces /TM or /TimeManagement
-
 <b>Teamchat:</b>
 Implements the /teamchat command
 
