@@ -9,3 +9,6 @@ Implements the /teamchat command
 
 <b>Stopwatch:</b>
 A stopwatch plugin, based on Venk's own stopwatch. To be used with messageblocks
+
+<b>Animations:</b>
+Comprehensive block animations
