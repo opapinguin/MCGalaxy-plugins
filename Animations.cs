@@ -1,3 +1,5 @@
+//reference System.dll
+
 using MCGalaxy.Events.LevelEvents;
 using MCGalaxy.Maths;
 using MCGalaxy.Tasks;
@@ -13,34 +15,34 @@ namespace MCGalaxy
     ************************/
 
     /* I opted for cache locality, insofar as we can achieve that in C#
-     It's not the most compact way to store these animations but it's easy to read and write and keeps related data packed */
+     It's not the most compact way to store these animations but it's fast to read and write and keeps related data packed */
 
 
     // Contains all the animations for a map
-    struct MapAnimation
+    internal struct MapAnimation
     {
         public bool bRunning;
         public int _currentTick;
         public List<AnimBlock> _blocks;
-        public ushort numAnimations;
+        public ushort numLoops;
     }
 
     // An animated block at a specific coordinate. Can contain many animated loops
-    struct AnimBlock
+    internal struct AnimBlock
     {
         public ushort _x;
         public ushort _y;
         public ushort _z;
         public BlockID _currentBlock;  // Currently visible block
         public SortedList<ushort, AnimLoop> _loopList; // List sorted by index
-        public void setCurrentBlock(BlockID block)
+        public void SetCurrentBlock(BlockID block)
         {
             _currentBlock = block;
         }
     }
 
     // A single loop
-    struct AnimLoop
+    internal struct AnimLoop
     {
         public int _stride;         // The period of the loop
         public int _width;          // The length of time we keep seeing the loop
@@ -62,17 +64,20 @@ namespace MCGalaxy
         public override void Load(bool startup)
         {
             CreateAnimsDir();
-            
+
+            StartAnimations();
+
             OnLevelLoadedEvent.Register(HandleLevelLoaded, Priority.Normal);
             OnLevelUnloadEvent.Register(HandleLevelUnload, Priority.Normal);
 
-            taskSave = Server.MainScheduler.QueueRepeat(WriteAllAnimations, null, TimeSpan.FromSeconds(SAVE_DELAY));
+            taskSave = Server.MainScheduler.QueueRepeat(SaveAllAnimations, null, TimeSpan.FromSeconds(SAVE_DELAY));
 
-            AnimationScheduler.Activate();
-            AnimationScheduler.UpdateActiveLevels();
+            AnimationHandler.Activate();
+            AnimationHandler.InitializeActiveLevels();
 
             Command.Register(new CmdAnimation());
         }
+
         public override void Unload(bool shutdown)
         {
             OnLevelLoadedEvent.Unregister(HandleLevelLoaded);
@@ -92,9 +97,10 @@ namespace MCGalaxy
                 {
                     Directory.CreateDirectory("Animations");
                 }
-                catch
+                catch (Exception e)
                 {
                     Logger.Log(LogType.Error, "Failed to create Animations folder");
+                    Logger.Log(LogType.Error, e.StackTrace);
                 }
             }
         }
@@ -106,59 +112,131 @@ namespace MCGalaxy
         private void HandleLevelLoaded(Level level)
         {
             ReadAnimation(level);
-            AnimationScheduler.UpdateActiveLevels();
+            AnimationHandler.AddToActiveLevels(level);
         }
 
         private void HandleLevelUnload(Level level, ref bool cancel)
         {
-            WriteAnimation(level);
-            AnimationScheduler.UpdateActiveLevels();
+            SaveAnimation(level);
+            AnimationHandler.RemoveFromActiveLevels(level);
         }
 
-        /*****************
-        * FILE HANDLING *
-        *****************/
+        /******************************
+        * FILE AND ANIMATION HANDLING *
+        *******************************/
 
-        public static void WriteAllAnimations(SchedulerTask task)
+        // Starts all animations for maps that have them
+        private void StartAnimations()
         {
             foreach (Level level in LevelInfo.Loaded.Items)
             {
-                WriteAnimation(level);
+                ReadAnimation(level);
             }
         }
 
+        public static void SaveAllAnimations(SchedulerTask task)
+        {
+            foreach (Level level in LevelInfo.Loaded.Items)
+            {
+                SaveAnimation(level);
+            }
+        }
+
+        // Read the animation file for a level if it exists, then sends it to the level's MapAnimation (creates it if it does not exist)
         public static void ReadAnimation(Level level)
         {
-            MapAnimation mapAnim;
+            // File is ordered as <x> <y> <z> <index> <stride> <width> <start> <end> <blockID>
+            List<String> animFile;
+            try
+            {
+                if (File.Exists(String.Format("Animations/{0}+animation.txt", level.name)))
+                {
+                    string[] logFile = File.ReadAllLines(String.Format("Animations/{0}+animation.txt", level.name));
+                    animFile = new List<string>(logFile);
+                } else
+                {
+                    return;
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.Log(LogType.Error, String.Format("Could not read Animations/{0}+animation.txt", level.name));
+                Logger.Log(LogType.Error, e.StackTrace);
+                return;
+            }
 
-            mapAnim._currentTick = 0;
-            mapAnim.loops = new List<Loop>();
-            mapAnim.bRunning = true;
-
-            // TODO: craete extras animation if it does not exist. Then load the map animation into it (Don't have to create actually)
-
-            return;
+            // Write into the MapAnimation for the level
+            foreach (String l in animFile)
+            {
+                string[] line = l.Split(' ');
+                try
+                {
+                    AnimationHandler.Add(level, (ushort)l[0], (ushort)l[1], (ushort)l[2], (ushort)l[3], (ushort)l[4], (ushort)l[5], (ushort)l[6], (short)l[7], (BlockID)l[8]);
+                }
+                catch (Exception e)
+                {
+                    Logger.Log(LogType.Error, String.Format("Could not read line \"{0}\" from Aimations/{1}+animation.txt"), l, level.name);
+                    Logger.Log(LogType.Error, e.StackTrace);
+                    return;
+                }
+            }
         }
 
         // Write the animation thus far to [level]+animation.txt in ./Animations
-        public static void WriteAnimation(Level level)
+        public static void SaveAnimation(Level level)
         {
             if (!level.Extras.Contains("MapAnimation")) return;
 
             MapAnimation mapAnim = (MapAnimation)level.Extras["MapAnimation"];
 
-            ConditionalCreateAnimation(level);
+            ConditionalCreateAnimationFile(level);
 
-            // TODO: Write the animation to the corresponding file
-            return;
+            if (mapAnim.numLoops == 0)
+            {
+                ConditionalDeleteAnimationFile(level);
+                return;
+            }
+
+            TextWriter tw = new StreamWriter(String.Format("Animations/{0}+animation.txt", level.name), false);
+            foreach (AnimBlock animBlock in mapAnim._blocks)
+            {
+                foreach (var kvp in animBlock._loopList)
+                {
+                    // File is ordered as <x> <y> <z> <index> <stride> <width> <start> <end> <blockID>
+                    tw.WriteLine(String.Format("{0} {1} {2} {3} {4} {5} {6} {7} {8}", animBlock._x, animBlock._y, animBlock._z, kvp.Key, kvp.Value._stride, kvp.Value._width, kvp.Value._startTick, kvp.Value._endTick, kvp.Value._block));
+                }
+            }
         }
 
         // Creates the animation file [level]+animation.txt in ./Animations if it does not exist
-        public static void ConditionalCreateAnimation(Level level)
+        public static void ConditionalCreateAnimationFile(Level level)
         {
             if (!AnimationExists(level))
             {
-                File.Create(String.Format("Animations/{0}+animation.txt", level.name));
+                try
+                {
+                    File.Create(String.Format("Animations/{0}+animation.txt", level.name));
+                } catch (Exception e)
+                {
+                    Logger.Log(LogType.Error, String.Format("Failed to create file \"Animations/{0}+animation.txt\"", level.name));
+                    Logger.Log(LogType.Error, e.StackTrace);
+                }
+            }
+        }
+
+        // Deletes the animation file [level]+animation.txt in ./Animations if it exists
+        public static void ConditionalDeleteAnimationFile(Level level)
+        {
+            if (AnimationExists(level))
+            {
+                try
+                {
+                    File.Delete(String.Format("Animations/{0}+animation.txt", level.name));
+                } catch (Exception e)
+                {
+                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"Animations/{0}+animation.txt\"", level.name));
+                    Logger.Log(LogType.Error, e.StackTrace);
+                }
             }
         }
 
@@ -170,14 +248,15 @@ namespace MCGalaxy
 
     }
 
-    public static class AnimationScheduler
+    // Handles animation scheduling across maps as well as adding loops to/removing loops from animations in these maps
+    public static class AnimationHandler
     {
         const ushort TICKS_PER_SECOND = 10;
         static Scheduler instance;
         static readonly object activateLock = new object();
-        static List<Level> activeLevels;
+        static List<Level> activeLevels = new List<Level>();
 
-        public static void Activate()
+        internal static void Activate()
         {
             lock (activateLock)
             {
@@ -190,9 +269,8 @@ namespace MCGalaxy
 
         // Updates which levels contain animations and which do not
         // It's much more efficient to keep track of levels with animations when needed rather than everytime we call AnimationsTick
-        public static void UpdateActiveLevels()
+        internal static void InitializeActiveLevels()
         {
-            activeLevels.Clear();
             foreach (Level level in LevelInfo.Loaded.Items)
             {
                 if (level.Extras.Contains("MapAnimation"))
@@ -202,13 +280,31 @@ namespace MCGalaxy
             }
         }
 
+        // Adds a level to the active levels
+        internal static void AddToActiveLevels(Level level)
+        {
+            if (!activeLevels.Contains(level))
+            {
+                activeLevels.Add(level);
+            }
+        }
+
+        // Removes a level to the active levels
+        internal static void RemoveFromActiveLevels(Level level)
+        {
+            if (activeLevels.Contains(level))
+            {
+                activeLevels.Remove(level);
+            }
+        }
+
         // Handles animation across all maps
         static void AnimationsTick(SchedulerTask task)
         {
             Level[] levels = LevelInfo.Loaded.Items;
             foreach (Level level in activeLevels)
             {
-                Update(level, (MapAnimation)level.Extras["MapAnimation"]);
+                Update(level&, (MapAnimation)level.Extras["MapAnimation"]);
             }
         }
 
@@ -235,18 +331,24 @@ namespace MCGalaxy
                         {
                             continue;
                         }
-                        
+
                         if (currentBlock == UInt16.MaxValue)   // Loop is in off state
                         {
                             pl.RevertBlock(animBlock._x, animBlock._y, animBlock._z);
-                        } else  // Loop is in on state
+                        }
+                        else  // Loop is in on state
                         {
                             pl.SendBlockchange(currentBlock, animBlock._x, animBlock._y, animBlock._z);
                         }
                     }
-                    animBlock.setCurrentBlock(currentBlock);
+                    animBlock.SetCurrentBlock(currentBlock);
                 }
                 mapAnimation._currentTick += 1;
+
+                if (mapAnimation._currentTick == int.MaxValue)
+                {
+                    mapAnimation._currentTick = 0;
+                }
             }
         }
 
@@ -285,6 +387,156 @@ namespace MCGalaxy
             }
             return id;
         }
+
+        // Adds an animation loop to the level's animation. Creates animation block for this loop if it does not exist already
+        internal static void Add(Level level, ushort x, ushort y, ushort z, ushort index, ushort stride, ushort width, ushort start, short end, BlockID block)
+        {
+            ConditionalAddMapAnimation(level);
+
+            MapAnimation mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
+
+            AnimLoop loop;
+            loop._block = block;
+            loop._endTick = end;
+            loop._startTick = start;
+            loop._stride = stride;
+            loop._width = width;
+
+            // Add loop to an existing animation block if it exists
+            foreach (AnimBlock aBlock in mapAnimation._blocks)
+            {
+                if (aBlock._x == x && aBlock._y == y && aBlock._z == z)
+                {
+
+                    aBlock._loopList.Add(index, loop);
+                    // TODO: Maybe set the animation block's current block here
+                    mapAnimation.numLoops += 1;
+                    return;
+                }
+            }
+
+            // Create the animation block then add the loop
+            AnimBlock animBlock;
+            animBlock._currentBlock = block;
+            animBlock._x = x;
+            animBlock._y = y;
+            animBlock._z = z;
+
+            animBlock._loopList = new SortedList<ushort, AnimLoop>();
+            animBlock._loopList.Add(index, loop);
+
+            mapAnimation.numLoops += 1;
+        }
+
+        // Initializes a map animation if it does not already exist. Adds it to the active levels
+        private static void ConditionalAddMapAnimation(Level level)
+        {
+            if (!activeLevels.Contains(level))
+            {
+                activeLevels.Add(level);
+            }
+
+            if (!level.Extras.Contains("MapAnimation"))
+            {
+                MapAnimation mapAnimation;
+                mapAnimation.numLoops = 0;
+                mapAnimation._blocks = new List<AnimBlock>();
+                mapAnimation._currentTick = 0;
+                mapAnimation.bRunning = true;
+                level.Extras["MapAnimation"] = mapAnimation;
+            }
+        }
+
+        // Remove a map animation if it exists. Removes it from the active levels
+        private static void ConditionalRemoveMapAnimation(Level level)
+        {
+            if (activeLevels.Contains(level))
+            {
+                activeLevels.Remove(level);
+            }
+
+            if (!level.Extras.Contains("MapAnimation")) { return; }
+            level.Extras.Remove("MapAnimation");
+        }
+
+        // Places a loop in a level. If all is true, replaces all loops for a block
+        internal static void Place(Level level, ushort x, ushort y, ushort z, ushort idx, ushort stride, ushort width, short startTick, ushort endTick, ushort block, bool all)
+        {
+            MapAnimation mapAnimation;
+
+            ConditionalAddMapAnimation(level);
+
+            mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
+            
+            if (mapAnimation.numLoops == ushort.MaxValue)
+            {
+                return;
+            }
+
+            if (all)    // This means we're overwriting all loops, ignoring the need for a specific index
+            {
+                // In case we're overwritng existing animations
+                foreach (AnimBlock animBlock in mapAnimation._blocks)
+                {
+                    if (animBlock._x == x && animBlock._y == y && animBlock._z == z)
+                    {
+                        animBlock._loopList.Clear();
+                        AnimLoop loop = new AnimLoop();
+                        loop._endTick = endTick;
+                        loop._startTick = startTick;
+                        loop._stride = stride;
+                        loop._width = width;
+
+                        animBlock._loopList.Add(idx, loop);
+
+                        mapAnimation.numLoops += 1;
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Deletes a loop in a level. If all is true, deletes all loops for a block
+        internal static void Delete(Level level, ushort x, ushort y, ushort z, ushort idx, bool all)
+        {
+            if (!level.Extras.Contains("MapAnimation")) return;
+
+            MapAnimation mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
+
+            // Looks like a massive loop but takes no more than O(number of animation blocks) operations
+            foreach (AnimBlock animBlock in mapAnimation._blocks)
+            {
+                if (!(animBlock._x == x && animBlock._y == y && animBlock._z == z)) { continue; }
+
+                if (all)    // Remove all loops at the location
+                {
+                    mapAnimation.numLoops -= (ushort)mapAnimation._blocks.Count;
+                    if (mapAnimation.numLoops <= 0)
+                    {
+                        ConditionalRemoveMapAnimation(level);
+                    }
+
+                    mapAnimation._blocks.Remove(animBlock);
+                    return;
+                }
+                else
+                {
+                    foreach (var kvp in animBlock._loopList)    // Find the loop with the specified index and remove only that
+                    {
+                        if (kvp.Key == idx)
+                        {
+                            animBlock._loopList.Remove(kvp.Key);
+                            mapAnimation.numLoops -= 1;
+                            if (mapAnimation.numLoops <= 0)
+                            {
+                                ConditionalRemoveMapAnimation(level);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     public sealed class CmdAnimation : Command2
@@ -297,13 +549,13 @@ namespace MCGalaxy
         public override void Use(Player p, string message)
         {
             // The player needs to be whitelisted to use the command
-            if (!p.level.BuildAccess.Whitelisted.Contains(p.name))
+            if (!Level.Load(p.level.name).BuildAccess.CheckAllowed(p))
             {
                 p.Message("You do not have permissions to use animations on this level.");
                 return;
             }
 
-            string[] args = message.SplitSpaces();
+            string[] args = message.ToLower().SplitSpaces();
 
             AnimationArgs animArgs = new AnimationArgs();
 
@@ -315,7 +567,7 @@ namespace MCGalaxy
                 case 1: // "/anim stop", "/anim start", "/anim show", "/anim delete", "/anim save" (and just "/anim" is also considered length 1)
                     if (args[0] == "stop")          // "/anim stop"
                     {
-                        StopAnim(p.level);
+                        StopAnim(Level.Load(p.level.name));
                         return;
                     }
                     else if (args[0] == "start")    // "/anim start"
@@ -330,7 +582,8 @@ namespace MCGalaxy
                     }
                     else if (args[0] == "save")     // "/anim save"
                     {
-                        AnimationsPlugin.WriteAnimation(p.level);
+                        AnimationsPlugin.SaveAnimation(p.level);
+                        p.Message("Animation saved");
                         return;
                     }
                     else if (args[0] == "delete")   // "anim delete"
@@ -348,6 +601,12 @@ namespace MCGalaxy
                         animArgs._commandCode = (ushort)AnimCommandCode.Info;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
+                    } else if (args[0] == "test")   // TODO: remove this
+                    {
+                        MapAnimation mapAnim = (MapAnimation)p.Extras["MapAnimation"];
+                        p.Message(mapAnim.numLoops.ToString());
+                        p.Message(mapAnim._currentTick.ToString());
+                        p.Message(mapAnim.bRunning.ToString());
                     }
                     else
                     {
@@ -542,9 +801,8 @@ namespace MCGalaxy
         * HELPER FUNCTIONS *
         ********************/
 
-        // Information needed when we mark a block. bPlace tells us whether to place or remove, bInfo whether we are
-        // looking just for info, bAll whether we look for a specific loop or whether we edit all loops in animation block
-        public enum AnimCommandCode : ushort   // Stores info about which command we're using
+        // Stores info about which command is being accessed
+        public enum AnimCommandCode : ushort
         {
             delete = 0,
             strideWidth = 1,
@@ -557,6 +815,8 @@ namespace MCGalaxy
             AddNumStartEndStrideWidth = 8,
             Info = 9
         }
+
+        // Information needed when we mark a block for placing/deleting
         private struct AnimationArgs
         {
             public short _startTick;
@@ -568,7 +828,7 @@ namespace MCGalaxy
             public ushort _commandCode; // Command code (see above enum)
         }
 
-        // Once a block is placed this is called. See the definition of AnimationArgs for the members of the state
+        // Once a block is placed this is called. See the definition of AnimationArgs (above) for state members
         private bool PlacedMark(Player p, Vec3S32[] marks, object state, BlockID block)
         {
             ushort x = (ushort)marks[0].X, y = (ushort)marks[0].Y, z = (ushort)marks[0].Z;
@@ -580,7 +840,7 @@ namespace MCGalaxy
                     DeleteAnimation(p, x, y, z, animArgs._idx, true);
                     break;
                 case (ushort)AnimCommandCode.strideWidth:
-                    PlaceAnimation(p, x, y, z, animArgs, true);
+                    PlaceAnimation(p, x, y, z, animArgs, block, true);
                     break;
                 case (ushort)AnimCommandCode.deleteNum:
                     DeleteAnimation(p, x, y, z, animArgs._idx, false);
@@ -589,19 +849,19 @@ namespace MCGalaxy
                     SwapAnimation(p, x, y, z, animArgs);
                     break;
                 case (ushort)AnimCommandCode.addStrideWidth:
-                    PlaceAnimation(p, x, y, z, animArgs, false);
+                    PlaceAnimation(p, x, y, z, animArgs, block, false);
                     break;
                 case (ushort)AnimCommandCode.StartEndStrideWidth:
-                    PlaceAnimation(p, x, y, z, animArgs, true);
+                    PlaceAnimation(p, x, y, z, animArgs, block, true);
                     break;
                 case (ushort)AnimCommandCode.AddNumStrideWidth:
-                    PlaceAnimation(p, x, y, z, animArgs, false);
+                    PlaceAnimation(p, x, y, z, animArgs, block, false);
                     break;
                 case (ushort)AnimCommandCode.AddStartEndStrideWidth:
-                    PlaceAnimation(p, x, y, z, animArgs, false);
+                    PlaceAnimation(p, x, y, z, animArgs, block, false);
                     break;
                 case (ushort)AnimCommandCode.AddNumStartEndStrideWidth:
-                    PlaceAnimation(p, x, y, z, animArgs, false);
+                    PlaceAnimation(p, x, y, z, animArgs, block, false);
                     break;
                 case (ushort)AnimCommandCode.Info:
                     InfoAnim(p, x, y, z);
@@ -612,78 +872,17 @@ namespace MCGalaxy
             return true;
         }
 
-        // Deletes an animation block at (x, y, z). If all is true, then we delete all animations at that position. Else delete that of idx
+        // Deletes an animation block at (x, y, z). If all is true, then we delete all animations at that position. Else delete that of a specific loop within an animation block with index idx
         private void DeleteAnimation(Player p, ushort x, ushort y, ushort z, ushort idx, bool all)
         {
-            if (!p.level.Extras.Contains("MapAnimation")) return;
-            MapAnimation mapAnimation = (MapAnimation)p.level.Extras["MapAnimation"];
-
-            // Looks like a massive loop but takes no more than O(number of animation blocks) operations
-            foreach (AnimBlock animBlock in mapAnimation._blocks)
-            {
-                if (!(animBlock._x == x && animBlock._y == y && animBlock._z == z)) { continue; }
-
-                if (all)    // Remove all loops at the location
-                {
-                    mapAnimation.numAnimations -= (ushort)mapAnimation._blocks.Count;
-                    mapAnimation._blocks.Remove(animBlock);
-                    p.Message(String.Format("Deleted animation block at ({0}, {1}, {2}}", x, y, z));
-                    return;
-                }
-                else
-                {
-                    foreach (var kvp in animBlock._loopList)    // Find the loop with the specified index and remove only that
-                    {
-                        if (kvp.Key == idx)
-                        {
-                            animBlock._loopList.Remove(kvp.Key);
-                            mapAnimation.numAnimations -= 1;
-                            p.Message(String.Format("Deleted animation block at ({0}, {1}, {2}}", x, y, z));
-                            return;
-                        }
-                    }
-                }
-            }
+            AnimationHandler.Delete(p.level, x, y, z, idx, all);
         }
 
         // Places an animation block at (x, y, z)
-        private void PlaceAnimation(Player p, ushort x, ushort y, ushort z, AnimationArgs animArgs, bool all)
+        private void PlaceAnimation(Player p, ushort x, ushort y, ushort z, AnimationArgs animArgs, BlockID block, bool all)
         {
-            MapAnimation mapAnimation;
-            if (!p.level.Extras.Contains("MapAnimation"))
-            {
-                p.level.Extras["MapAnimation"] = new MapAnimation();
-                mapAnimation = (MapAnimation)p.level.Extras["MapAnimation"];
-                mapAnimation._blocks = new List<AnimBlock>();
-                mapAnimation._currentTick = 0;
-                mapAnimation.numAnimations = 0;
-                mapAnimation.bRunning = true;
-            }
-
-            mapAnimation = (MapAnimation)p.level.Extras["MapAnimation"];
-
-            if (all)    // This means we're overwriting all loops, ignoring the need for a specific index
-            {
-                // In case we're overwritng existing animations
-                foreach (AnimBlock animBlock in mapAnimation._blocks)
-                {
-                    if (animBlock._x == x && animBlock._y == y && animBlock._z == z)
-                    {
-                        animBlock._loopList.Clear();
-                        AnimLoop loop = new AnimLoop();
-                        loop._endTick = animArgs._endTick;
-                        loop._startTick = animArgs._startTick;
-                        loop._endTick = animArgs._endTick;
-                        loop._stride = animArgs._stride;
-                        loop._width = animArgs._width;
-                        animBlock._loopList.Add(animArgs._idx, loop);
-
-                        mapAnimation.numAnimations += 1;
-                        p.Message(String.Format("Placed animation block at ({0}, {1}, {2})", x, y, z));
-                        return;
-                    }
-                }
-            }
+            AnimationHandler.Place(p.level, x, y, z, animArgs._idx, animArgs._stride, animArgs._width, animArgs._startTick, animArgs._endTick, block, all);
+            p.Message(String.Format("Placed animation block at ({0}, {1}, {2})", x, y, z));
         }
 
         // Swaps two loops inside an index. IF a loop doesn't exist, it just changes the key in a straightforward fashion
