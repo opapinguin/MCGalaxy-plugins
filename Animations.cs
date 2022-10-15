@@ -226,6 +226,7 @@ namespace MCGalaxy
             if (!AnimationHandler.HasAnims(level))
             {
                 ConditionalDeleteAnimationFile(level);
+                return;
             }
 
             MapAnimation mapAnim = AnimationHandler.dictActiveLevels[level.name];
@@ -685,7 +686,7 @@ namespace MCGalaxy
                     }
                     else if (args[0] == "show")     // "/anim show"
                     {
-                        ShowAnim(p.level, p);
+                        ShowAnim(p.level, ref p);
                         return;
                     }
                     else if (args[0] == "save")     // "/anim save"
@@ -698,7 +699,7 @@ namespace MCGalaxy
                     {
                         p.Message("Mark where you want to delete animations");
 
-                        animArgs._commandCode = (ushort)AnimCommandCode.delete;
+                        animArgs._commandCode = (ushort)AnimCommandCode.Delete;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
@@ -769,12 +770,12 @@ namespace MCGalaxy
 
                         p.Message("Mark where you want to place your animation");
 
-                        animArgs._commandCode = (ushort)AnimCommandCode.strideWidth;
-                        animArgs._idx = 0;
+                        animArgs._commandCode = (ushort)AnimCommandCode.DtrideWidth;
                         animArgs._width = width;
                         animArgs._endTick = ushort.MaxValue;
                         animArgs._stride = stride;
                         animArgs._startTick = 1;
+                        animArgs._idx = 0;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
@@ -782,7 +783,7 @@ namespace MCGalaxy
                     {
                         p.Message("Mark where you want to delete your animation");
 
-                        animArgs._commandCode = (ushort)AnimCommandCode.deleteNum;
+                        animArgs._commandCode = (ushort)AnimCommandCode.DeleteNum;
                         animArgs._idx = num;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
@@ -798,13 +799,13 @@ namespace MCGalaxy
                         return;
                     }
                     break;
-                case 3: // "/anim swap [num1] [num2]", "/anim add stride width"
-                    ushort idx1, idx2;
+                case 3: // "/anim swap [num1] [num2]", "/anim add stride width", "/anim start stride width"
+                    ushort idx1, idx2; short start;
                     if (args[0] == "swap" && ushort.TryParse(args[1], out idx1) && ushort.TryParse(args[2], out idx2))   // "/anim swap [num1] [num2]"
                     {
                         p.Message("Mark where you want to perform the swap");
 
-                        animArgs._commandCode = (ushort)AnimCommandCode.swapNum1Num2;
+                        animArgs._commandCode = (ushort)AnimCommandCode.SwapNum1Num2;
                         animArgs._idx = idx1;
                         animArgs._idx2 = idx2;
 
@@ -820,12 +821,30 @@ namespace MCGalaxy
 
                         p.Message("Mark where you want to place your animation");
 
-                        animArgs._commandCode = (ushort)AnimCommandCode.addStrideWidth;
+                        animArgs._commandCode = (ushort)AnimCommandCode.AddStrideWidth;
                         animArgs._stride = stride;
                         animArgs._width = width;
                         animArgs._endTick = ushort.MaxValue;
                         animArgs._startTick = 1;
                         animArgs._idx = ushort.MaxValue;
+
+                        p.MakeSelection(1, animArgs, PlacedMark);
+                    } else if (short.TryParse(args[0], out start) && ushort.TryParse(args[1], out stride) && ushort.TryParse(args[2], out width))    // "/anim start stride width"
+                    {
+                        if (width > stride)
+                        {
+                            p.Message("Width cannot be greater than stride!");
+                            return;
+                        }
+
+                        p.Message("Mark where you want to place your animation");
+
+                        animArgs._commandCode = (ushort)AnimCommandCode.StartStrideWidth;
+                        animArgs._stride = stride;
+                        animArgs._width = width;
+                        animArgs._endTick = ushort.MaxValue;
+                        animArgs._startTick = start;
+                        animArgs._idx = 0;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
@@ -836,7 +855,7 @@ namespace MCGalaxy
                     }
                     break;
                 case 4: // "/anim [start] [end] [stride] [width]", "/anim add [num] [stride] [width]"
-                    short start; ushort end;
+                    ushort end;
                     if (short.TryParse(args[0], out start) && ushort.TryParse(args[1], out end) && ushort.TryParse(args[2], out stride) && ushort.TryParse(args[3], out width)) // "/anim [start] [end] [stride] [width]"
                     {
                         if (width > stride)
@@ -921,6 +940,7 @@ namespace MCGalaxy
                         animArgs._width = width;
                         animArgs._startTick = start;
                         animArgs._endTick = end;
+                        animArgs._idx = ushort.MaxValue;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
@@ -979,16 +999,18 @@ namespace MCGalaxy
         // Stores info about which command is being accessed
         public enum AnimCommandCode : ushort
         {
-            delete = 0,
-            strideWidth = 1,
-            deleteNum = 2,
-            swapNum1Num2 = 3,
-            addStrideWidth = 4,
+            Delete = 0,
+            DtrideWidth = 1,
+            DeleteNum = 2,
+            SwapNum1Num2 = 3,
+            AddStrideWidth = 4,
             StartEndStrideWidth = 5,
             AddNumStrideWidth = 6,
             AddStartEndStrideWidth = 7,
             AddNumStartEndStrideWidth = 8,
-            Info = 9
+            Info = 9,
+            StartStrideWidth = 10,
+            AddStartStrideWidth = 11
         }
 
         // Information needed when we mark a block for placing/deleting
@@ -1011,19 +1033,19 @@ namespace MCGalaxy
 
             switch (animArgs._commandCode)
             {
-                case (ushort)AnimCommandCode.delete:
+                case (ushort)AnimCommandCode.Delete:
                     DeleteAnimation(p, x, y, z, animArgs._idx, true);
                     break;
-                case (ushort)AnimCommandCode.strideWidth:
+                case (ushort)AnimCommandCode.DtrideWidth:
                     PlaceAnimation(p, x, y, z, animArgs, block, true);
                     break;
-                case (ushort)AnimCommandCode.deleteNum:
+                case (ushort)AnimCommandCode.DeleteNum:
                     DeleteAnimation(p, x, y, z, animArgs._idx, false);
                     break;
-                case (ushort)AnimCommandCode.swapNum1Num2:
+                case (ushort)AnimCommandCode.SwapNum1Num2:
                     SwapAnimation(p, x, y, z, animArgs);
                     break;
-                case (ushort)AnimCommandCode.addStrideWidth:
+                case (ushort)AnimCommandCode.AddStrideWidth:
                     PlaceAnimation(p, x, y, z, animArgs, block, false);
                     break;
                 case (ushort)AnimCommandCode.StartEndStrideWidth:
@@ -1040,6 +1062,9 @@ namespace MCGalaxy
                     break;
                 case (ushort)AnimCommandCode.Info:
                     InfoAnim(p, x, y, z);
+                    break;
+                case (ushort)AnimCommandCode.StartStrideWidth:
+                    PlaceAnimation(p, x, y, z, animArgs, block, true);
                     break;
                 default:
                     break;
@@ -1123,7 +1148,7 @@ namespace MCGalaxy
             return;
         }
 
-        void ShowAnim(Level level, Player p)
+        void ShowAnim(Level level, ref Player p)
         {
             if (!p.Extras.Contains("ShowAnim"))
             {
@@ -1139,7 +1164,6 @@ namespace MCGalaxy
                     {
                         p.SendBlockchange(animBlock._x, animBlock._y, animBlock._z, Block.Red);
                     }
-                    AnimationHandler.SendCurrentFrame(p, level);
                     p.Extras["ShowAnim"] = false;
                 }
                 else
@@ -1219,7 +1243,7 @@ namespace MCGalaxy
                     break;
                 case "2":
                     p.Message(@"/animation stop");
-                    p.Message("Stops the animation in its current state");
+                    p.Message(@"Stops the animation in its current state");
                     p.Message(@"/animation start");
                     p.Message(@"Starts the animation in its current state");
                     p.Message(@"/animation show");
@@ -1236,9 +1260,26 @@ namespace MCGalaxy
                     p.Message(@"Plays animation at the given tick");
                     p.Message(@"For advanced multi-layered animations, type /help animation 3");
                     break;
+                case "0":
+                    p.Message(@"Animations let us create blocks that periodically toggle on and off");
+                    p.Message(@"When a map is loaded it begins a timer that starts at 1 and ticks forward every 10th of a second");
+                    p.Message(@"The animation command uses...");
+                    p.Message(@"(1) [start] to indicate which tick to start on");
+                    p.Message(@"(2) [end] to indicate which to freeze the animation on");
+                    p.Message(@"(3) [stride] to indicate the period of the animation");
+                    p.Message(@"(4) [width] to indicate the length of time the block will be visible");
+                    p.Message(@"Animations are such loops that are put into animation blocks");
+                    p.Message(@"Animation blocks can contain several loops at once. By default we overwrite all loops");
+                    p.Message(@"For an animation block with several loops, we render ones with higher indices in front of ones with lower indices");
+                    p.Message(@"When these loops are in their ""off"" state, they render the normal block behind them");
+                    p.Message(@"The ""add"" flag gives us more control over how to manipulate loops in the same animation block");
+                    break;
                 default:
+                    p.Message(@"For a complete explanation use /help animation 0");
                     p.Message(@"/animation [start] [end] [stride] [width]");
                     p.Message(@"Adds an animation that begins on the start tick and ends on the end tick.");
+                    p.Message(@"/animation [start] [stride] [width]");
+                    p.Message(@"Adds an animation that begins on the start tick");
                     p.Message(@"/animation [stride] [width]");
                     p.Message(@"Adds an animation that begins immediately and never ends.");
                     p.Message(@"NOTE: a tick is 1/10th of a second)");
