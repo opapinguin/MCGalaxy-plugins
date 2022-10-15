@@ -96,8 +96,11 @@ namespace MCGalaxy
         {
             OnLevelLoadedEvent.Unregister(HandleLevelLoaded);
             OnLevelUnloadEvent.Unregister(HandleLevelUnload);
+            OnPlayerClickEvent.Unregister(HandlePlayerClick);
+            OnJoinedLevelEvent.Unregister(HandleJoinLevel);
 
             Server.MainScheduler.Cancel(taskSave);
+            AnimationHandler.Deactivate();
 
             Command.Unregister(Command2.Find("Animation"));
         }
@@ -279,6 +282,8 @@ namespace MCGalaxy
         const ushort TICKS_PER_SECOND = 10;
         static Scheduler instance;
         static readonly object activateLock = new object();
+        static readonly object deactivateLock = new object();
+        static SchedulerTask task;
         public static Dictionary<string, MapAnimation> dictActiveLevels = new Dictionary<string, MapAnimation>();  // Levels with map animations
 
         internal static void Activate()
@@ -288,8 +293,20 @@ namespace MCGalaxy
                 if (instance != null) return;
 
                 instance = new Scheduler("AnimationScheduler");
-                instance.QueueRepeat(AnimationsTick, null, TimeSpan.FromMilliseconds(1000 / TICKS_PER_SECOND));
+                task = instance.QueueRepeat(AnimationsTick, null, TimeSpan.FromMilliseconds(1000 / TICKS_PER_SECOND));
             }
+        }
+
+        internal static void Deactivate()
+        {
+            lock (deactivateLock)
+            {
+                if (instance != null)
+                {
+                    instance.Cancel(task);
+                }
+            }
+            dictActiveLevels.Clear();
         }
 
         // Keeps track of animations in this level
@@ -611,7 +628,8 @@ namespace MCGalaxy
                     {
                         aBlock._loopList[index] = new AnimLoop(stride, width, start, end, block);
                         return;
-                    } else
+                    }
+                    else
                     {
                         aBlock._loopList.Add(index, loop);
                         // TODO: Maybe set the animation block's current block here
