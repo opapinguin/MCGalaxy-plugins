@@ -66,7 +66,9 @@ namespace MCGalaxy
 
     public class AnimationsPlugin : Plugin
     {
-        const int SAVE_DELAY = 60 * 5;  // We save all animations every 5 minutes
+        public static int SAVE_DELAY = 60 * 10;  // We save all animations every 10 minutes
+        public static string SERVER_PATH = @"/home/opapinguin/MapBuild";        // NOTE: YOU NEED TO CHANGE THIS
+        public static ushort TICKS_PER_SECOND = 10;
 
         public override string creator { get { return "Opapinguin"; } }
         public override string MCGalaxy_Version { get { return "1.9.4.2"; } }
@@ -130,7 +132,7 @@ namespace MCGalaxy
         {
             foreach (Level level in LevelInfo.Loaded.Items)
             {
-                if (File.Exists(String.Format("Animations/{0}+animation.txt", level.name)))
+                if (File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name)))
                 {
                     ReadAnimation(level);
                 }
@@ -186,9 +188,9 @@ namespace MCGalaxy
             List<String> animFile;
             try
             {
-                if (File.Exists(String.Format("Animations/{0}+animation.txt", level.name)))
+                if (File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name)))
                 {
-                    string[] logFile = File.ReadAllLines(String.Format("Animations/{0}+animation.txt", level.name));
+                    string[] logFile = File.ReadAllLines(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name));
                     animFile = new List<string>(logFile);
                 }
                 else
@@ -198,7 +200,7 @@ namespace MCGalaxy
             }
             catch (Exception e)
             {
-                Logger.Log(LogType.Error, String.Format("Could not read Animations/{0}+animation.txt", level.name));
+                Logger.Log(LogType.Error, String.Format("Could not read {0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name));
                 Logger.Log(LogType.Error, e.StackTrace);
                 return;
             }
@@ -225,6 +227,7 @@ namespace MCGalaxy
         {
             if (!AnimationHandler.HasAnims(level))
             {
+                Logger.Log(LogType.ConsoleMessage, "Test1");
                 ConditionalDeleteAnimationFile(level);
                 return;
             }
@@ -233,6 +236,7 @@ namespace MCGalaxy
 
             if (mapAnim._numLoops == 0)
             {
+                Logger.Log(LogType.ConsoleMessage, "Test2");
                 ConditionalDeleteAnimationFile(level);
                 return;
             }
@@ -247,7 +251,7 @@ namespace MCGalaxy
                 }
             }
 
-            File.WriteAllLines(String.Format("Animations/{0}+animation.txt", level.name, false), lines.ToArray());     // TODO: Make this async if it turns out slow to write all animations
+            File.WriteAllLines(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name), lines.ToArray());     // TODO: Make this async if it turns out slow to write all animations
         }
 
         // Deletes the animation file [level]+animation.txt in ./Animations if it exists
@@ -257,11 +261,11 @@ namespace MCGalaxy
             {
                 try
                 {
-                    File.Delete(String.Format("Animations/{0}+animation.txt", level.name));
+                    File.Delete(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name));
                 }
                 catch (Exception e)
                 {
-                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"Animations/{0}+animation.txt\"", level.name));
+                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"{0}/Animations/{1}+animation.txt\"", AnimationsPlugin.SERVER_PATH, level.name));
                     Logger.Log(LogType.Error, e.StackTrace);
                 }
             }
@@ -270,7 +274,7 @@ namespace MCGalaxy
         // Checks if [level]+animations.txt exists in ./Animations
         public static bool AnimationExists(Level level)
         {
-            return File.Exists(String.Format("Animations/{0}+animation.txt", level.name));
+            return File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name));
         }
 
     }
@@ -280,7 +284,6 @@ namespace MCGalaxy
     // Are made for each player, so that using the ExtrasCollection for each map will not be viable
     public static class AnimationHandler
     {
-        const ushort TICKS_PER_SECOND = 10;
         static Scheduler instance;
         static readonly object activateLock = new object();
         static readonly object deactivateLock = new object();
@@ -294,7 +297,7 @@ namespace MCGalaxy
                 if (instance != null) return;
 
                 instance = new Scheduler("AnimationScheduler");
-                task = instance.QueueRepeat(AnimationsTick, null, TimeSpan.FromMilliseconds(1000 / TICKS_PER_SECOND));
+                task = instance.QueueRepeat(AnimationsTick, null, TimeSpan.FromMilliseconds(1000 / AnimationsPlugin.TICKS_PER_SECOND));
             }
         }
 
@@ -677,16 +680,19 @@ namespace MCGalaxy
                     if (args[0] == "stop")          // "/anim stop"
                     {
                         StopAnim(p.level);
+                        p.Message("Stopped animation");
                         return;
                     }
                     else if (args[0] == "start")    // "/anim start"
                     {
                         StartAnim(p.level);
+                        p.Message("Started animation");
                         return;
                     }
                     else if (args[0] == "show")     // "/anim show"
                     {
                         ShowAnim(p.level, ref p);
+                        p.Message("Showing animation in red");
                         return;
                     }
                     else if (args[0] == "save")     // "/anim save"
@@ -1169,6 +1175,7 @@ namespace MCGalaxy
                 else
                 {
                     p.Extras["ShowAnim"] = true;
+                    AnimationHandler.SendCurrentFrame(p, level);
                 }
             }
             return;
