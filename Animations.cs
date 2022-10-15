@@ -3,6 +3,7 @@
 using MCGalaxy.Events.LevelEvents;
 using MCGalaxy.Maths;
 using MCGalaxy.Tasks;
+using MCGalaxy.Events.PlayerEvents;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -19,38 +20,49 @@ namespace MCGalaxy
 
 
     // Contains all the animations for a map
-    internal struct MapAnimation
+    public sealed class MapAnimation
     {
+        public MapAnimation(bool running, ushort currentTick, ushort numLoops)
+        {
+            this.bRunning = running; this._currentTick = currentTick; this._numLoops = numLoops; this._blocks = new List<AnimBlock>();
+        }
         public bool bRunning;
-        public int _currentTick;
+        public ushort _currentTick;
         public List<AnimBlock> _blocks;
-        public ushort numLoops;
+        public ushort _numLoops;
     }
 
     // An animated block at a specific coordinate. Can contain many animated loops
-    internal struct AnimBlock
+    public sealed class AnimBlock
     {
+        public AnimBlock(ushort x, ushort y, ushort z, BlockID block)
+        {
+            this._x = x; this._y = y; this._z = z; this._currentBlock = block; this._loopList = new SortedList<ushort, AnimLoop>();
+        }
         public ushort _x;
         public ushort _y;
         public ushort _z;
         public BlockID _currentBlock;  // Currently visible block
         public SortedList<ushort, AnimLoop> _loopList; // List sorted by index
-        public void SetCurrentBlock(BlockID block)
-        {
-            _currentBlock = block;
-        }
     }
 
     // A single loop
-    internal struct AnimLoop
+    public sealed class AnimLoop
     {
-        public int _stride;         // The period of the loop
-        public int _width;          // The length of time we keep seeing the loop
-        public int _startTick;      // Animation offset
-        public int _endTick;        // Animation end
+        public AnimLoop(ushort stride, ushort width, short startTick, ushort endTick, BlockID block)
+        {
+            this._stride = stride; this._width = width; this._startTick = startTick; this._endTick = endTick; this._block = block;
+        }
+        public ushort _stride;         // The period of the loop
+        public ushort _width;          // The length of time we keep seeing the loop
+        public short _startTick;      // Animation offset
+        public ushort _endTick;        // Animation end
         public BlockID _block;
     }
 
+    /**********
+     * PLUGIN *
+     **********/
 
     public class AnimationsPlugin : Plugin
     {
@@ -69,11 +81,13 @@ namespace MCGalaxy
 
             OnLevelLoadedEvent.Register(HandleLevelLoaded, Priority.Normal);
             OnLevelUnloadEvent.Register(HandleLevelUnload, Priority.Normal);
+            OnPlayerClickEvent.Register(HandlePlayerClick, Priority.Normal);
+            OnJoinedLevelEvent.Register(HandleJoinLevel, Priority.Normal);
 
             taskSave = Server.MainScheduler.QueueRepeat(SaveAllAnimations, null, TimeSpan.FromSeconds(SAVE_DELAY));
 
             AnimationHandler.Activate();
-            AnimationHandler.InitializeActiveLevels();
+            InitializeAnimDict();
 
             Command.Register(new CmdAnimation());
         }
@@ -109,16 +123,36 @@ namespace MCGalaxy
          * EVENT HANDLERS *
          ******************/
 
+        private void InitializeAnimDict()
+        {
+            foreach (Level level in LevelInfo.Loaded.Items)
+            {
+                if (File.Exists(String.Format("Animations/{0}+animation.txt", level.name)))
+                {
+                    ReadAnimation(level);
+                }
+            }
+        }
+
         private void HandleLevelLoaded(Level level)
         {
             ReadAnimation(level);
-            AnimationHandler.AddToActiveLevels(level);
         }
 
         private void HandleLevelUnload(Level level, ref bool cancel)
         {
             SaveAnimation(level);
             AnimationHandler.RemoveFromActiveLevels(level);
+        }
+
+        private void HandlePlayerClick(Player p, MouseButton button, MouseAction action, ushort yaw, ushort pitch, byte entity, ushort x, ushort y, ushort z, TargetBlockFace face)
+        {
+            AnimationHandler.SendCurrentFrameBlock(p, x, y, z);
+        }
+
+        private void HandleJoinLevel(Player p, Level prevLevel, Level level, ref bool announce)
+        {
+            AnimationHandler.SendCurrentFrame(p, level);
         }
 
         /******************************
@@ -153,7 +187,8 @@ namespace MCGalaxy
                 {
                     string[] logFile = File.ReadAllLines(String.Format("Animations/{0}+animation.txt", level.name));
                     animFile = new List<string>(logFile);
-                } else
+                }
+                else
                 {
                     return;
                 }
@@ -166,16 +201,16 @@ namespace MCGalaxy
             }
 
             // Write into the MapAnimation for the level
-            foreach (String l in animFile)
+            foreach (String line in animFile)
             {
-                string[] line = l.Split(' ');
+                string[] l = line.Split(' ');
                 try
                 {
-                    AnimationHandler.Add(level, (ushort)l[0], (ushort)l[1], (ushort)l[2], (ushort)l[3], (ushort)l[4], (ushort)l[5], (ushort)l[6], (short)l[7], (BlockID)l[8]);
+                    AnimationHandler.AddLoop(level, Convert.ToUInt16(l[0]), Convert.ToUInt16(l[1]), Convert.ToUInt16(l[2]), Convert.ToUInt16(l[3]), Convert.ToUInt16(l[4]), Convert.ToUInt16(l[5]), Convert.ToInt16(l[6]), Convert.ToUInt16(l[7]), Convert.ToUInt16(l[8]));
                 }
                 catch (Exception e)
                 {
-                    Logger.Log(LogType.Error, String.Format("Could not read line \"{0}\" from Aimations/{1}+animation.txt"), l, level.name);
+                    Logger.Log(LogType.Error, String.Format("Could not read line \" {0} \" from Animations/{1}+animation.txt", line, level.name));
                     Logger.Log(LogType.Error, e.StackTrace);
                     return;
                 }
@@ -185,43 +220,30 @@ namespace MCGalaxy
         // Write the animation thus far to [level]+animation.txt in ./Animations
         public static void SaveAnimation(Level level)
         {
-            if (!level.Extras.Contains("MapAnimation")) return;
+            if (!AnimationHandler.HasAnims(level))
+            {
+                ConditionalDeleteAnimationFile(level);
+            }
 
-            MapAnimation mapAnim = (MapAnimation)level.Extras["MapAnimation"];
+            MapAnimation mapAnim = AnimationHandler.dictActiveLevels[level.name];
 
-            ConditionalCreateAnimationFile(level);
-
-            if (mapAnim.numLoops == 0)
+            if (mapAnim._numLoops == 0)
             {
                 ConditionalDeleteAnimationFile(level);
                 return;
             }
 
-            TextWriter tw = new StreamWriter(String.Format("Animations/{0}+animation.txt", level.name), false);
+            List<string> lines = new List<string>();
             foreach (AnimBlock animBlock in mapAnim._blocks)
             {
                 foreach (var kvp in animBlock._loopList)
                 {
                     // File is ordered as <x> <y> <z> <index> <stride> <width> <start> <end> <blockID>
-                    tw.WriteLine(String.Format("{0} {1} {2} {3} {4} {5} {6} {7} {8}", animBlock._x, animBlock._y, animBlock._z, kvp.Key, kvp.Value._stride, kvp.Value._width, kvp.Value._startTick, kvp.Value._endTick, kvp.Value._block));
+                    lines.Add(String.Format("{0} {1} {2} {3} {4} {5} {6} {7} {8}", animBlock._x, animBlock._y, animBlock._z, kvp.Key, kvp.Value._stride, kvp.Value._width, kvp.Value._startTick, kvp.Value._endTick, kvp.Value._block));
                 }
             }
-        }
 
-        // Creates the animation file [level]+animation.txt in ./Animations if it does not exist
-        public static void ConditionalCreateAnimationFile(Level level)
-        {
-            if (!AnimationExists(level))
-            {
-                try
-                {
-                    File.Create(String.Format("Animations/{0}+animation.txt", level.name));
-                } catch (Exception e)
-                {
-                    Logger.Log(LogType.Error, String.Format("Failed to create file \"Animations/{0}+animation.txt\"", level.name));
-                    Logger.Log(LogType.Error, e.StackTrace);
-                }
-            }
+            File.WriteAllLines(String.Format("Animations/{0}+animation.txt", level.name, false), lines.ToArray());     // TODO: Make this async if it turns out slow to write all animations
         }
 
         // Deletes the animation file [level]+animation.txt in ./Animations if it exists
@@ -232,7 +254,8 @@ namespace MCGalaxy
                 try
                 {
                     File.Delete(String.Format("Animations/{0}+animation.txt", level.name));
-                } catch (Exception e)
+                }
+                catch (Exception e)
                 {
                     Logger.Log(LogType.Error, String.Format("Failed to delete file \"Animations/{0}+animation.txt\"", level.name));
                     Logger.Log(LogType.Error, e.StackTrace);
@@ -249,12 +272,14 @@ namespace MCGalaxy
     }
 
     // Handles animation scheduling across maps as well as adding loops to/removing loops from animations in these maps
+    // Note that we need to keep maps in this static class, because maps are not passed around by reference but rather many instances
+    // Are made for each player, so that using the ExtrasCollection for each map will not be viable
     public static class AnimationHandler
     {
         const ushort TICKS_PER_SECOND = 10;
         static Scheduler instance;
         static readonly object activateLock = new object();
-        static List<Level> activeLevels = new List<Level>();
+        public static Dictionary<string, MapAnimation> dictActiveLevels = new Dictionary<string, MapAnimation>();  // Levels with map animations
 
         internal static void Activate()
         {
@@ -267,54 +292,99 @@ namespace MCGalaxy
             }
         }
 
-        // Updates which levels contain animations and which do not
-        // It's much more efficient to keep track of levels with animations when needed rather than everytime we call AnimationsTick
-        internal static void InitializeActiveLevels()
+        // Keeps track of animations in this level
+        internal static bool HasAnims(Level level)
         {
-            foreach (Level level in LevelInfo.Loaded.Items)
-            {
-                if (level.Extras.Contains("MapAnimation"))
-                {
-                    activeLevels.Add(level);
-                }
-            }
+            return dictActiveLevels.ContainsKey(level.name);
+        }
+
+        internal static void SetAnims(Level level, MapAnimation mapAnim)
+        {
+            dictActiveLevels[level.name] = mapAnim;
         }
 
         // Adds a level to the active levels
-        internal static void AddToActiveLevels(Level level)
+        internal static void AddToActiveLevels(Level level, MapAnimation mapAnim)
         {
-            if (!activeLevels.Contains(level))
+            if (!HasAnims(level))
             {
-                activeLevels.Add(level);
+                dictActiveLevels.Add(level.name, mapAnim);
             }
         }
 
-        // Removes a level to the active levels
+        // Removes a level from the active levels
         internal static void RemoveFromActiveLevels(Level level)
         {
-            if (activeLevels.Contains(level))
+            if (HasAnims(level))
             {
-                activeLevels.Remove(level);
+                dictActiveLevels.Remove(level.name);
             }
         }
 
         // Handles animation across all maps
         static void AnimationsTick(SchedulerTask task)
         {
-            Level[] levels = LevelInfo.Loaded.Items;
-            foreach (Level level in activeLevels)
+            foreach (var kvp in dictActiveLevels)
             {
-                Update(level&, (MapAnimation)level.Extras["MapAnimation"]);
+                Update(kvp.Key);
+            }
+        }
+
+        // Sends current frame block identity. Useful when marking or breaking a block, or on level join event
+        internal static void SendCurrentFrame(Player p, Level level)
+        {
+            MapAnimation mapAnimation;
+            if (HasAnims(level))
+            {
+                mapAnimation = dictActiveLevels[level.name];
+            } else
+            {
+                return;
+            }
+
+            foreach (AnimBlock aBlock in mapAnimation._blocks)
+            {
+                BlockID CurrentBlock = GetCurrentBlock(aBlock._loopList, mapAnimation._currentTick);
+                if (CurrentBlock != BlockID.MaxValue)
+                {
+                    p.SendBlockchange(aBlock._x, aBlock._y, aBlock._z, CurrentBlock);
+                }
+            }
+        }
+
+        // Sends current frame block identity for a specific block
+        internal static void SendCurrentFrameBlock(Player p, ushort x, ushort y, ushort z)
+        {
+            MapAnimation mapAnimation;
+            if (HasAnims(p.level))
+            {
+                mapAnimation = dictActiveLevels[p.level.name];
+            } else
+            {
+                return;
+            }
+
+            foreach (AnimBlock aBlock in mapAnimation._blocks)
+            {
+                if (aBlock._x == x && aBlock._y == y && aBlock._z == z)
+                {
+                    BlockID CurrentBlock = GetCurrentBlock(aBlock._loopList, mapAnimation._currentTick);
+                    if (CurrentBlock != BlockID.MaxValue)
+                    {
+                        p.SendBlockchange(aBlock._x, aBlock._y, aBlock._z, CurrentBlock);
+                    }
+                    return;
+                }
             }
         }
 
         // Handles animation on a single map
-        static void Update(Level level, MapAnimation mapAnimation)
+        static void Update(string level)
         {
+            MapAnimation mapAnimation = dictActiveLevels[level];
+            List<Player> players = LevelInfo.FindExact(level).getPlayers();      // TODO: Could cache this
             if (mapAnimation.bRunning)
             {
-                List<Player> players = level.getPlayers();  // TODO: This is inefficient, should cache it somewhere
-
                 foreach (AnimBlock animBlock in mapAnimation._blocks)
                 {
                     BlockID prevBlock = animBlock._currentBlock;    // Previous frame's block
@@ -322,7 +392,7 @@ namespace MCGalaxy
 
                     if (currentBlock == prevBlock) // Don't have to send block changes if the block doesn't change
                     {
-                        return;
+                        continue;
                     }
 
                     foreach (Player pl in players)
@@ -332,20 +402,21 @@ namespace MCGalaxy
                             continue;
                         }
 
-                        if (currentBlock == UInt16.MaxValue)   // Loop is in off state
+                        if (currentBlock == System.UInt16.MaxValue)   // Loop is in off state
                         {
                             pl.RevertBlock(animBlock._x, animBlock._y, animBlock._z);
                         }
                         else  // Loop is in on state
                         {
-                            pl.SendBlockchange(currentBlock, animBlock._x, animBlock._y, animBlock._z);
+                            pl.SendBlockchange(animBlock._x, animBlock._y, animBlock._z, currentBlock);
                         }
                     }
-                    animBlock.SetCurrentBlock(currentBlock);
+                    animBlock._currentBlock = currentBlock;
                 }
+
                 mapAnimation._currentTick += 1;
 
-                if (mapAnimation._currentTick == int.MaxValue)
+                if (mapAnimation._currentTick == ushort.MaxValue)
                 {
                     mapAnimation._currentTick = 0;
                 }
@@ -353,7 +424,7 @@ namespace MCGalaxy
         }
 
         // Gets the currently visible block given the tick across an array of loops. Returns 65535 if no block is visible at that frame
-        private static BlockID GetCurrentBlock(SortedList<ushort, AnimLoop> loops, int tick)
+        private static BlockID GetCurrentBlock(SortedList<ushort, AnimLoop> loops, ushort tick)
         {
             BlockID loopActiveBlock;
             foreach (var kvp in loops)  // kvp = (index, AnimLoop). Note that this loops from lowest to highest index automatically
@@ -369,139 +440,117 @@ namespace MCGalaxy
         }
 
         // Gets the currently visible block for a single loop. Returns 65535 if the loop is "off" in a frame
-        private static BlockID CurrentBlock(AnimLoop loop, int tick)
+        private static BlockID CurrentBlock(AnimLoop loop, ushort tick)
         {
-            BlockID id = System.UInt16.MaxValue;
+            if (tick < loop._startTick)
+            {
+                return System.UInt16.MaxValue;
+            }
+
             if (tick > loop._endTick)
             {
-                if (((loop._endTick + 1 - loop._startTick) % loop._stride) < loop._width)       // If the block is active during the loop  TODO: See if itshould say tick +1 or just tick
+                if (((loop._endTick - loop._startTick) % loop._stride) < loop._width)       // If the block is active during the loop  TODO: See if it should say tick +1 or just tick
                 {
                     return loop._block;
                 }
-                return id;
+                return System.UInt16.MaxValue;
             }
 
-            if (((tick + 1 - loop._startTick) % loop._stride) < loop._width)       // If the block is active during the loop  TODO: See if itshould say tick +1 or just tick
+            if (((tick - loop._startTick) % loop._stride) < loop._width)       // If the block is active during the loop  TODO: See if it should say tick +1 or just tick
             {
                 return loop._block;
             }
-            return id;
-        }
 
-        // Adds an animation loop to the level's animation. Creates animation block for this loop if it does not exist already
-        internal static void Add(Level level, ushort x, ushort y, ushort z, ushort index, ushort stride, ushort width, ushort start, short end, BlockID block)
-        {
-            ConditionalAddMapAnimation(level);
-
-            MapAnimation mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
-
-            AnimLoop loop;
-            loop._block = block;
-            loop._endTick = end;
-            loop._startTick = start;
-            loop._stride = stride;
-            loop._width = width;
-
-            // Add loop to an existing animation block if it exists
-            foreach (AnimBlock aBlock in mapAnimation._blocks)
-            {
-                if (aBlock._x == x && aBlock._y == y && aBlock._z == z)
-                {
-
-                    aBlock._loopList.Add(index, loop);
-                    // TODO: Maybe set the animation block's current block here
-                    mapAnimation.numLoops += 1;
-                    return;
-                }
-            }
-
-            // Create the animation block then add the loop
-            AnimBlock animBlock;
-            animBlock._currentBlock = block;
-            animBlock._x = x;
-            animBlock._y = y;
-            animBlock._z = z;
-
-            animBlock._loopList = new SortedList<ushort, AnimLoop>();
-            animBlock._loopList.Add(index, loop);
-
-            mapAnimation.numLoops += 1;
+            return System.UInt16.MaxValue;
         }
 
         // Initializes a map animation if it does not already exist. Adds it to the active levels
         private static void ConditionalAddMapAnimation(Level level)
         {
-            if (!activeLevels.Contains(level))
+            if (!HasAnims(level))
             {
-                activeLevels.Add(level);
-            }
+                MapAnimation mapAnimation = new MapAnimation(true, 0, 0)
+                {
+                    _blocks = new List<AnimBlock>()
+                };
 
-            if (!level.Extras.Contains("MapAnimation"))
-            {
-                MapAnimation mapAnimation;
-                mapAnimation.numLoops = 0;
-                mapAnimation._blocks = new List<AnimBlock>();
-                mapAnimation._currentTick = 0;
-                mapAnimation.bRunning = true;
-                level.Extras["MapAnimation"] = mapAnimation;
+                SetAnims(level, mapAnimation);
             }
         }
 
         // Remove a map animation if it exists. Removes it from the active levels
         private static void ConditionalRemoveMapAnimation(Level level)
         {
-            if (activeLevels.Contains(level))
+            if (HasAnims(level))
             {
-                activeLevels.Remove(level);
+                RemoveFromActiveLevels(level);
             }
-
-            if (!level.Extras.Contains("MapAnimation")) { return; }
-            level.Extras.Remove("MapAnimation");
         }
 
-        // Places a loop in a level. If all is true, replaces all loops for a block
-        internal static void Place(Level level, ushort x, ushort y, ushort z, ushort idx, ushort stride, ushort width, short startTick, ushort endTick, ushort block, bool all)
+        // Places a loop in a level. If "all" is set to true, replaces all loops for a block
+        internal static void Place(Level level, ushort x, ushort y, ushort z, ushort idx, ushort stride, ushort width, short startTick, ushort endTick, BlockID block, bool all)
         {
-            MapAnimation mapAnimation;
-
             ConditionalAddMapAnimation(level);
 
-            mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
-            
-            if (mapAnimation.numLoops == ushort.MaxValue)
+            MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
+
+            if (mapAnimation._numLoops == ushort.MaxValue)
             {
                 return;
             }
 
-            if (all)    // This means we're overwriting all loops, ignoring the need for a specific index
+            foreach (AnimBlock animB in mapAnimation._blocks)
             {
-                // In case we're overwritng existing animations
-                foreach (AnimBlock animBlock in mapAnimation._blocks)
+                if (animB._x == x && animB._y == y && animB._z == z)
                 {
-                    if (animBlock._x == x && animBlock._y == y && animBlock._z == z)
+                    AnimLoop loop = new AnimLoop(stride, width, startTick, endTick, block);
+
+                    if (all)
                     {
-                        animBlock._loopList.Clear();
-                        AnimLoop loop = new AnimLoop();
-                        loop._endTick = endTick;
-                        loop._startTick = startTick;
-                        loop._stride = stride;
-                        loop._width = width;
-
-                        animBlock._loopList.Add(idx, loop);
-
-                        mapAnimation.numLoops += 1;
-                        return;
+                        mapAnimation._numLoops -= (ushort)animB._loopList.Count;
+                        animB._loopList.Clear();
                     }
+
+                    // If idx is maxvalue, it's a special value indicating we fill in the first available key (e.g. for use in /anim add [stride] [wdidth])
+                    if (idx == ushort.MaxValue)
+                    {
+                        ushort i = 0;
+
+                        while (animB._loopList.Keys.Contains(i))
+                        {
+                            i += 1;
+                        }
+                        idx = i;
+                    }
+
+                    // Replace loop if exists. Otherwise overwrite it
+                    if (animB._loopList.Keys.Contains(idx))
+                    {
+                        animB._loopList[idx] = loop;
+                    } else
+                    {
+                        animB._loopList.Add(idx, loop);
+                        mapAnimation._numLoops += 1;
+                    }
+
+                    return;
                 }
             }
+
+            // If we're here, it means we're not overwriting a block but creating a new one
+            AnimBlock animBlock = new AnimBlock(x, y, z, block);
+            animBlock._loopList.Add(1, new AnimLoop(stride, width, startTick, endTick, block));
+
+            mapAnimation._blocks.Add(animBlock);
+            mapAnimation._numLoops += 1;
         }
 
         // Deletes a loop in a level. If all is true, deletes all loops for a block
         internal static void Delete(Level level, ushort x, ushort y, ushort z, ushort idx, bool all)
         {
-            if (!level.Extras.Contains("MapAnimation")) return;
+            if (!AnimationHandler.HasAnims(level)) return;
 
-            MapAnimation mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
+            MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
 
             // Looks like a massive loop but takes no more than O(number of animation blocks) operations
             foreach (AnimBlock animBlock in mapAnimation._blocks)
@@ -510,8 +559,8 @@ namespace MCGalaxy
 
                 if (all)    // Remove all loops at the location
                 {
-                    mapAnimation.numLoops -= (ushort)mapAnimation._blocks.Count;
-                    if (mapAnimation.numLoops <= 0)
+                    mapAnimation._numLoops -= (ushort)animBlock._loopList.Count;
+                    if (mapAnimation._numLoops <= 0)
                     {
                         ConditionalRemoveMapAnimation(level);
                     }
@@ -526,8 +575,14 @@ namespace MCGalaxy
                         if (kvp.Key == idx)
                         {
                             animBlock._loopList.Remove(kvp.Key);
-                            mapAnimation.numLoops -= 1;
-                            if (mapAnimation.numLoops <= 0)
+
+                            if (animBlock._loopList.Count == 0)
+                            {
+                                mapAnimation._blocks.Remove(animBlock);
+                            }
+
+                            mapAnimation._numLoops -= 1;
+                            if (mapAnimation._numLoops <= 0)
                             {
                                 ConditionalRemoveMapAnimation(level);
                             }
@@ -536,6 +591,42 @@ namespace MCGalaxy
                     }
                 }
             }
+        }
+
+        // Adds a loop in a level. Creates animation block for this loop if it does not exist already. If loop index already exists, overwrites it
+        internal static void AddLoop(Level level, ushort x, ushort y, ushort z, ushort index, ushort stride, ushort width, short start, ushort end, BlockID block)
+        {
+            ConditionalAddMapAnimation(level);
+
+            MapAnimation mapAnimation = dictActiveLevels[level.name];
+
+            AnimLoop loop = new AnimLoop(stride, width, start, end, block);
+
+            // Add loop to an existing animation block if it exists
+            foreach (AnimBlock aBlock in mapAnimation._blocks)
+            {
+                if (aBlock._x == x && aBlock._y == y && aBlock._z == z)
+                {
+                    if (aBlock._loopList.ContainsKey(index))
+                    {
+                        aBlock._loopList[index] = new AnimLoop(stride, width, start, end, block);
+                        return;
+                    } else
+                    {
+                        aBlock._loopList.Add(index, loop);
+                        // TODO: Maybe set the animation block's current block here
+                        mapAnimation._numLoops += 1;
+                        return;
+                    }
+                }
+            }
+
+            // Create the animation block then add the loop
+            AnimBlock animBlock = new AnimBlock(x, y, z, block);
+            animBlock._loopList.Add(index, loop);
+            mapAnimation._blocks.Add(animBlock);
+
+            mapAnimation._numLoops += 1;
         }
     }
 
@@ -548,8 +639,7 @@ namespace MCGalaxy
 
         public override void Use(Player p, string message)
         {
-            // The player needs to be whitelisted to use the command
-            if (!Level.Load(p.level.name).BuildAccess.CheckAllowed(p))
+            if (!p.level.BuildAccess.CheckAllowed(p))
             {
                 p.Message("You do not have permissions to use animations on this level.");
                 return;
@@ -564,10 +654,10 @@ namespace MCGalaxy
              ******************/
             switch (args.Length)
             {
-                case 1: // "/anim stop", "/anim start", "/anim show", "/anim delete", "/anim save" (and just "/anim" is also considered length 1)
+                case 1: // "/anim stop", "/anim start", "/anim show", "/anim delete", "/anim save", "/anim restart", "/anim info" (and just "/anim" is also considered length 1)
                     if (args[0] == "stop")          // "/anim stop"
                     {
-                        StopAnim(Level.Load(p.level.name));
+                        StopAnim(p.level);
                         return;
                     }
                     else if (args[0] == "start")    // "/anim start"
@@ -601,12 +691,43 @@ namespace MCGalaxy
                         animArgs._commandCode = (ushort)AnimCommandCode.Info;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
-                    } else if (args[0] == "test")   // TODO: remove this
+                    }
+                    else if (args[0] == "restart")
                     {
-                        MapAnimation mapAnim = (MapAnimation)p.Extras["MapAnimation"];
-                        p.Message(mapAnim.numLoops.ToString());
+                        p.Message("Restarted animation");
+
+                        AnimationHandler.dictActiveLevels[p.level.name]._currentTick = 1;
+                    }
+                    else if (args[0] == "test")   // TODO: remove this
+                    {
+                        MapAnimation mapAnim = AnimationHandler.dictActiveLevels[p.level.name];
+                        p.Message(mapAnim._numLoops.ToString());
                         p.Message(mapAnim._currentTick.ToString());
                         p.Message(mapAnim.bRunning.ToString());
+
+                        /*
+                        foreach (AnimBlock animBlock in mapAnim._blocks)
+                        {
+                            p.Message("------------");
+                            p.Message("Current block: " + animBlock._currentBlock.ToString());
+                            foreach (var kvp in animBlock._loopList)
+                            {
+                                BlockID bl = kvp.Key;
+                                AnimLoop l = kvp.Value;
+                                p.Message("ID: " + bl.ToString());
+                                p.Message("Block: " + l._block.ToString());
+                                p.Message("EndTick: "+ l._endTick.ToString());
+                                p.Message("StartTick: " + l._startTick.ToString());
+                                p.Message("Stride: " + l._stride.ToString());
+                                p.Message("Widht: " + l._width.ToString());
+                            }
+                            p.Message("X: " + animBlock._x.ToString());
+                            p.Message("Y: " + animBlock._y.ToString());
+                            p.Message("Z: " + animBlock._z.ToString());
+                            p.Message("------------");
+                            p.SendBlockchange(animBlock._x, animBlock._y, animBlock._z, 1);
+                        }
+                        */
                     }
                     else
                     {
@@ -614,33 +735,44 @@ namespace MCGalaxy
                         return;
                     }
                     break;
-                case 2: // "/anim [stride] [width]", "/anim [delete] [num]"
-                    ushort stride, width, num;
+                case 2: // "/anim [stride] [width]", "/anim [delete] [num]", "/anim at [tick]"
+                    ushort stride, width, num, tick;
                     if (ushort.TryParse(args[0], out stride) && ushort.TryParse(args[1], out width))    // "/anim [stride] [width]"
                     {
                         if (width > stride)
                         {
                             p.Message("Width cannot be greater than stride!");
                             return;
+                        } else if (width == 0)
+                        {
+                            p.Message("Width cannot be 0");
+                            return;
                         }
 
                         p.Message("Mark where you want to place your animation");
 
                         animArgs._commandCode = (ushort)AnimCommandCode.strideWidth;
+                        animArgs._idx = 0;
+                        animArgs._width = width;
                         animArgs._endTick = ushort.MaxValue;
                         animArgs._stride = stride;
-                        animArgs._startTick = 0;
+                        animArgs._startTick = 1;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
-                    else if (args[0] == "delete" && ushort.TryParse(args[1], out num))
-                    {                   // "/anim delete [num]"
+                    else if (args[0] == "delete" && ushort.TryParse(args[1], out num))                   // "/anim delete [num]"
+                    {
                         p.Message("Mark where you want to delete your animation");
 
                         animArgs._commandCode = (ushort)AnimCommandCode.deleteNum;
                         animArgs._idx = num;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
+                    } else if (args[0] == "at" && ushort.TryParse(args[1], out tick))        // "/anim at [tick]"
+                    {
+                        p.Message(String.Format("Set tick to {0}", tick.ToString()));
+
+                        AnimationHandler.dictActiveLevels[p.level.name]._currentTick = tick;
                     }
                     else
                     {
@@ -673,6 +805,9 @@ namespace MCGalaxy
                         animArgs._commandCode = (ushort)AnimCommandCode.addStrideWidth;
                         animArgs._stride = stride;
                         animArgs._width = width;
+                        animArgs._endTick = ushort.MaxValue;
+                        animArgs._startTick = 1;
+                        animArgs._idx = ushort.MaxValue;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
@@ -690,8 +825,11 @@ namespace MCGalaxy
                         {
                             p.Message("Width cannot be greater than stride!");
                             return;
-                        }
-                        else if (start > end)
+                        } else if (width == 0)
+                        {
+                            p.Message("Width cannot be 0");
+                            return;
+                        } else if (start > end)
                         {
                             p.Message("Start cannot be greater than end!");
                             return;
@@ -704,6 +842,7 @@ namespace MCGalaxy
                         animArgs._endTick = end;
                         animArgs._stride = stride;
                         animArgs._width = width;
+                        animArgs._idx = 0;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
@@ -713,14 +852,20 @@ namespace MCGalaxy
                         {
                             p.Message("Width cannot be greater than stride!");
                             return;
+                        } else if (width == 0)
+                        {
+                            p.Message("Width cannot be 0!");
+                            return;
                         }
 
                         p.Message("Mark where you want to place your animation");
 
                         animArgs._commandCode = (ushort)AnimCommandCode.AddNumStrideWidth;
-                        animArgs._idx = num;
                         animArgs._stride = stride;
                         animArgs._width = width;
+                        animArgs._startTick = 1;
+                        animArgs._endTick = ushort.MaxValue;
+                        animArgs._idx = num;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
@@ -738,7 +883,14 @@ namespace MCGalaxy
                             p.Message("Width cannot be greater than stride!");
                             return;
                         }
-                        else if (start > end)
+
+                        if (width == 0)
+                        {
+                            p.Message("Width cannot be 0!");
+                            return;
+                        }
+
+                        if (start > end)
                         {
                             p.Message("Start cannot be greater than end!");
                             return;
@@ -760,12 +912,16 @@ namespace MCGalaxy
                         return;
                     }
                     break;
-                case 6: // "/anim num [start] [end] [stride] [width]"
-                    if (args[0] == "num" && short.TryParse(args[1], out start) && ushort.TryParse(args[2], out end) && ushort.TryParse(args[3], out stride) && ushort.TryParse(args[4], out width)) // "/anim num [start] [end] [stride] [width]"
+                case 6: // "/anim [num] [start] [end] [stride] [width]"
+                    if (args[0] == "add" && ushort.TryParse(args[1], out num) && short.TryParse(args[2], out start) && ushort.TryParse(args[3], out end) && ushort.TryParse(args[4], out stride) && ushort.TryParse(args[5], out width)) // "/anim add [num] [start] [end] [stride] [width]"
                     {
                         if (width > stride)
                         {
                             p.Message("Width cannot be greater than stride!");
+                            return;
+                        } else if (width == 0)
+                        {
+                            p.Message("Width cannot be 0!");
                             return;
                         }
                         else if (start > end)
@@ -781,6 +937,7 @@ namespace MCGalaxy
                         animArgs._width = width;
                         animArgs._startTick = start;
                         animArgs._endTick = end;
+                        animArgs._idx = num;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
@@ -891,11 +1048,11 @@ namespace MCGalaxy
             ushort idx1 = animArgs._idx;
             ushort idx2 = animArgs._idx2;
 
-            if (!p.level.Extras.Contains("MapAnimation")) return;
+            if (!AnimationHandler.HasAnims(p.level)) return;
 
             if (idx1 == idx2) return;
 
-            MapAnimation mapAnimation = (MapAnimation)p.level.Extras["MapAnimation"];
+            MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[p.level.name];
 
             foreach (AnimBlock animBlock in mapAnimation._blocks)
             {
@@ -917,9 +1074,10 @@ namespace MCGalaxy
                     }
                     else
                     {
-                        AnimLoop tmp = animBlock._loopList[idx1];
+                        AnimLoop loop1 = animBlock._loopList[idx1];
+                        AnimLoop tmp = new AnimLoop(loop1._stride, loop1._width, loop1._startTick, loop1._endTick, loop1._block);
                         animBlock._loopList[idx1] = animBlock._loopList[idx2];
-                        animBlock._loopList[idx2] = animBlock._loopList[idx1];
+                        animBlock._loopList[idx2] = tmp;
                     }
                 }
             }
@@ -931,20 +1089,18 @@ namespace MCGalaxy
 
         void StopAnim(Level level)
         {
-            if (level.Extras.Contains("MapAnimation"))
+            if (AnimationHandler.HasAnims(level))
             {
-                MapAnimation mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
-                mapAnimation.bRunning = false;
+                AnimationHandler.dictActiveLevels[level.name].bRunning = false;
             }
             return;
         }
 
         void StartAnim(Level level)
         {
-            if (level.Extras.Contains("MapAnimation"))
+            if (AnimationHandler.HasAnims(level))
             {
-                MapAnimation mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
-                mapAnimation.bRunning = true;
+                AnimationHandler.dictActiveLevels[level.name].bRunning = true;
             }
             return;
         }
@@ -956,15 +1112,16 @@ namespace MCGalaxy
                 p.Extras["ShowAnim"] = true;
             }
 
-            if (level.Extras.Contains("MapAnimation"))
+            if (AnimationHandler.HasAnims(level))
             {
-                MapAnimation mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
+                MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
                 if ((bool)p.Extras["ShowAnim"])
                 {
                     foreach (AnimBlock animBlock in mapAnimation._blocks)
                     {
                         p.SendBlockchange(animBlock._x, animBlock._y, animBlock._z, Block.Red);
                     }
+                    AnimationHandler.SendCurrentFrame(p, level);
                     p.Extras["ShowAnim"] = false;
                 }
                 else
@@ -979,12 +1136,14 @@ namespace MCGalaxy
         void InfoAnim(Player p, ushort x, ushort y, ushort z)
         {
             Level level = p.level;
-            if (level.Extras.Contains("MapAnimation"))
+            if (AnimationHandler.HasAnims(level))
             {
-                MapAnimation mapAnimation = (MapAnimation)level.Extras["MapAnimation"];
+                MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
 
-                AnimBlock selection;
-                selection._loopList = null;
+                AnimBlock selection = new AnimBlock(x, y, z, Block.Air)
+                {
+                    _loopList = null
+                };
 
                 foreach (AnimBlock animBlock in mapAnimation._blocks)
                 {
@@ -1002,7 +1161,7 @@ namespace MCGalaxy
                 }
 
                 // If you made it this far the animation block was found and has something to show
-                p.Message("Animations in this block: <index> : <stride> <width> <start> <end> <blockID>");
+                p.Message("<index> : <stride> <width> <start> <end> <blockID>");
                 AnimLoop currentLoop;
                 foreach (var kvp in selection._loopList)
                 {
@@ -1052,7 +1211,11 @@ namespace MCGalaxy
                     p.Message(@"/animation info");
                     p.Message(@"Returns all info about the animation block");
                     p.Message(@"/animation save");
-                    p.Message(@"Saves the animations on the map (happens automatically every few minutes)");
+                    p.Message(@"Saves the animations on the map");
+                    p.Message(@"/animation restart");
+                    p.Message(@"Restarts the animation");
+                    p.Message(@"/animation at [tick]");
+                    p.Message(@"Plays animation at the given tick");
                     p.Message(@"For advanced multi-layered animations, type /help animation 3");
                     break;
                 default:
@@ -1067,4 +1230,3 @@ namespace MCGalaxy
         }
     }
 }
-
