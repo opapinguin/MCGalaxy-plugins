@@ -8,6 +8,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using BlockID = System.UInt16;
+using BlockRaw = System.Byte;
+using MCGalaxy.Network;
 
 namespace MCGalaxy
 {
@@ -67,7 +69,7 @@ namespace MCGalaxy
     public class AnimationsPlugin : Plugin
     {
         public static int SAVE_DELAY = 60 * 10;  // We save all animations every 10 minutes
-        public static string SERVER_PATH = @"/home/opapinguin/MapBuild";        // NOTE: YOU NEED TO CHANGE THIS
+        public static string SERVER_PATH = @"C:\Users\laure\Desktop\MCGalaxy-master\bin\Debug";        // NOTE: YOU NEED TO CHANGE THIS
         public static ushort TICKS_PER_SECOND = 10;
 
         public override string creator { get { return "Opapinguin"; } }
@@ -289,6 +291,7 @@ namespace MCGalaxy
         static readonly object activateLock = new object();
         static readonly object deactivateLock = new object();
         static SchedulerTask task;
+        static BufferedBlockSender buffer = new BufferedBlockSender();
         public static Dictionary<string, MapAnimation> dictActiveLevels = new Dictionary<string, MapAnimation>();  // Levels with map animations
 
         internal static void Activate()
@@ -312,6 +315,7 @@ namespace MCGalaxy
                 }
             }
             dictActiveLevels.Clear();
+            buffer = new BufferedBlockSender();
         }
 
         // Keeps track of animations in this level
@@ -323,15 +327,6 @@ namespace MCGalaxy
         internal static void SetAnims(Level level, MapAnimation mapAnim)
         {
             dictActiveLevels[level.name] = mapAnim;
-        }
-
-        // Adds a level to the active levels
-        internal static void AddToActiveLevels(Level level, MapAnimation mapAnim)
-        {
-            if (!HasAnims(level))
-            {
-                dictActiveLevels.Add(level.name, mapAnim);
-            }
         }
 
         // Removes a level from the active levels
@@ -359,7 +354,8 @@ namespace MCGalaxy
             if (HasAnims(level))
             {
                 mapAnimation = dictActiveLevels[level.name];
-            } else
+            }
+            else
             {
                 return;
             }
@@ -381,7 +377,8 @@ namespace MCGalaxy
             if (HasAnims(p.level))
             {
                 mapAnimation = dictActiveLevels[p.level.name];
-            } else
+            }
+            else
             {
                 return;
             }
@@ -395,6 +392,10 @@ namespace MCGalaxy
                     {
                         p.SendBlockchange(aBlock._x, aBlock._y, aBlock._z, CurrentBlock);
                     }
+                    else
+                    {
+                        p.RevertBlock(aBlock._x, aBlock._y, aBlock._z);
+                    }
                     return;
                 }
             }
@@ -404,9 +405,10 @@ namespace MCGalaxy
         static void Update(string level)
         {
             MapAnimation mapAnimation = dictActiveLevels[level];
-            List<Player> players = LevelInfo.FindExact(level).getPlayers();      // TODO: Could cache this
+            Level currentLevel = LevelInfo.FindExact(level);
             if (mapAnimation.bRunning)
             {
+                buffer.level = currentLevel;
                 foreach (AnimBlock animBlock in mapAnimation._blocks)
                 {
                     BlockID prevBlock = animBlock._currentBlock;    // Previous frame's block
@@ -417,23 +419,27 @@ namespace MCGalaxy
                         continue;
                     }
 
-                    foreach (Player pl in players)
+                    // Special value saying that the loop is off. Revert to usual block
+                    if (currentBlock == UInt16.MaxValue)
                     {
-                        if (pl.Extras.Contains("ShowAnim") && !(bool)pl.Extras["ShowAnim"]) // If the player has reveal animations turned on (animations as red blocks)
-                        {
-                            continue;
-                        }
-
-                        if (currentBlock == System.UInt16.MaxValue)   // Loop is in off state
-                        {
-                            pl.RevertBlock(animBlock._x, animBlock._y, animBlock._z);
-                        }
-                        else  // Loop is in on state
-                        {
-                            pl.SendBlockchange(animBlock._x, animBlock._y, animBlock._z, currentBlock);
-                        }
+                        currentBlock = currentLevel.GetBlock(animBlock._x, animBlock._y, animBlock._z);
                     }
+
+                    int index = currentLevel.PosToInt((ushort)animBlock._x, (ushort)animBlock._y, (ushort)animBlock._z);
+
+                    buffer.Add(index, currentBlock);
+
+                    if (buffer.count == 255)
+                    {
+                        buffer.Flush();
+                    }
+
                     animBlock._currentBlock = currentBlock;
+                }
+
+                if (buffer.count != 0)
+                {
+                    buffer.Flush();
                 }
 
                 mapAnimation._currentTick += 1;
@@ -549,7 +555,8 @@ namespace MCGalaxy
                     if (animB._loopList.Keys.Contains(idx))
                     {
                         animB._loopList[idx] = loop;
-                    } else
+                    }
+                    else
                     {
                         animB._loopList.Add(idx, loop);
                         mapAnimation._numLoops += 1;
@@ -677,7 +684,7 @@ namespace MCGalaxy
              ******************/
             switch (args.Length)
             {
-                case 1: // "/anim stop", "/anim start", "/anim show", "/anim delete", "/anim save", "/anim restart", "/anim info", "/anim copy", "/anim paste" (and just "/anim" is also considered length 1)
+                case 1: // "/anim stop", "/anim start", "/anim delete", "/anim save", "/anim restart", "/anim info", "/anim copy", "/anim paste" (and just "/anim" is also considered length 1)
                     if (args[0] == "stop")          // "/anim stop"
                     {
                         StopAnim(p.level);
@@ -688,12 +695,6 @@ namespace MCGalaxy
                     {
                         StartAnim(p.level);
                         p.Message("Started animation");
-                        return;
-                    }
-                    else if (args[0] == "show")     // "/anim show"
-                    {
-                        ShowAnim(p.level, ref p);
-                        p.Message("Showing animation in red");
                         return;
                     }
                     else if (args[0] == "save")     // "/anim save"
@@ -723,16 +724,20 @@ namespace MCGalaxy
                         p.Message("Restarted animation");
 
                         AnimationHandler.dictActiveLevels[p.level.name]._currentTick = 1;
-                    } else if (args[0] == "copy")       // "/anim copy"
+                        AnimationHandler.SendCurrentFrame(p, p.level);
+                    }
+                    else if (args[0] == "copy")       // "/anim copy"
                     {
                         p.Message("Mark the bounds of your animation copy");
                         animArgs._commandCode = (ushort)AnimCommandCode.Copy;
 
                         p.MakeSelection(2, animArgs, PlacedMark);
-                    } else if (args[0] == "paste")      // "/anim paste"
+                    }
+                    else if (args[0] == "paste")      // "/anim paste"
                     {
                         p.Message("Mark where you want to paste your animation");
                         animArgs._commandCode = (ushort)AnimCommandCode.Paste;
+                        animArgs._startTick = 0;    // Delay
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
@@ -742,15 +747,16 @@ namespace MCGalaxy
                         return;
                     }
                     break;
-                case 2: // "/anim [stride] [width]", "/anim [delete] [num]", "/anim at [tick]", "/anim delete cuboid"
-                    ushort stride, width, num, tick;
+                case 2: // "/anim [stride] [width]", "/anim [delete] [num]", "/anim at [tick]", "/anim delete cuboid", "/anim paste [delay]"
+                    ushort stride, width, num, tick; short delay;
                     if (ushort.TryParse(args[0], out stride) && ushort.TryParse(args[1], out width))    // "/anim [stride] [width]"
                     {
                         if (width > stride)
                         {
                             p.Message("Width cannot be greater than stride!");
                             return;
-                        } else if (width == 0)
+                        }
+                        else if (width == 0)
                         {
                             p.Message("Width cannot be 0");
                             return;
@@ -775,17 +781,29 @@ namespace MCGalaxy
                         animArgs._idx = num;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
-                    } else if (args[0] == "at" && ushort.TryParse(args[1], out tick))        // "/anim at [tick]"
+                    }
+                    else if (args[0] == "at" && ushort.TryParse(args[1], out tick))        // "/anim at [tick]"
                     {
                         p.Message(String.Format("Set tick to {0}", tick.ToString()));
 
                         AnimationHandler.dictActiveLevels[p.level.name]._currentTick = tick;
-                    } else if ((args[0] == "delete" && args[1] == "cuboid") || (args[0] == "delete" && args[1] == "z"))        // "/anim delete cuboid" or "/anim delete z"
+                        AnimationHandler.SendCurrentFrame(p, p.level);
+                    }
+                    else if ((args[0] == "delete" && args[1] == "cuboid") || (args[0] == "delete" && args[1] == "z"))        // "/anim delete cuboid" or "/anim delete z"
                     {
                         p.Message("Mark the bounds of your animation delete");
                         animArgs._commandCode = (ushort)AnimCommandCode.DeleteCuboid;
 
                         p.MakeSelection(2, animArgs, PlacedMark);
+                    }
+                    else if (args[0] == "paste" && short.TryParse(args[1], out delay))    // "/anim paste [delay]"
+                    {
+                        p.Message("Mark where you want to paste your animation");
+
+                        animArgs._commandCode = (ushort)AnimCommandCode.PasteDelay;
+                        animArgs._startTick = delay; // Delay
+
+                        p.MakeSelection(1, animArgs, PlacedMark);
                     }
                     else
                     {
@@ -823,7 +841,8 @@ namespace MCGalaxy
                         animArgs._idx = ushort.MaxValue;
 
                         p.MakeSelection(1, animArgs, PlacedMark);
-                    } else if (short.TryParse(args[0], out start) && ushort.TryParse(args[1], out stride) && ushort.TryParse(args[2], out width))    // "/anim start stride width"
+                    }
+                    else if (short.TryParse(args[0], out start) && ushort.TryParse(args[1], out stride) && ushort.TryParse(args[2], out width))    // "/anim start stride width"
                     {
                         if (width > stride)
                         {
@@ -856,11 +875,13 @@ namespace MCGalaxy
                         {
                             p.Message("Width cannot be greater than stride!");
                             return;
-                        } else if (width == 0)
+                        }
+                        else if (width == 0)
                         {
                             p.Message("Width cannot be 0");
                             return;
-                        } else if (start > end)
+                        }
+                        else if (start > end)
                         {
                             p.Message("Start cannot be greater than end!");
                             return;
@@ -883,7 +904,8 @@ namespace MCGalaxy
                         {
                             p.Message("Width cannot be greater than stride!");
                             return;
-                        } else if (width == 0)
+                        }
+                        else if (width == 0)
                         {
                             p.Message("Width cannot be 0!");
                             return;
@@ -951,7 +973,8 @@ namespace MCGalaxy
                         {
                             p.Message("Width cannot be greater than stride!");
                             return;
-                        } else if (width == 0)
+                        }
+                        else if (width == 0)
                         {
                             p.Message("Width cannot be 0!");
                             return;
@@ -1007,7 +1030,8 @@ namespace MCGalaxy
             AddStartStrideWidth = 11,
             Copy = 12,
             Paste = 13,
-            DeleteCuboid = 14
+            DeleteCuboid = 14,
+            PasteDelay = 15
         }
 
         // Information needed when we mark a block for placing/deleting
@@ -1073,10 +1097,13 @@ namespace MCGalaxy
                     CopyAnimation(p, x, y, z, x2, y2, z2);
                     break;
                 case (ushort)AnimCommandCode.Paste:
-                    PasteAnimation(p, x, y, z);
+                    PasteAnimation(p, x, y, z, 0);
                     break;
                 case (ushort)AnimCommandCode.DeleteCuboid:
                     DeleteAnimation(p, x, y, z, x2, y2, z2);
+                    break;
+                case (ushort)AnimCommandCode.PasteDelay:
+                    PasteAnimation(p, x, y, z, animArgs._startTick);
                     break;
                 default:
                     break;
@@ -1084,7 +1111,7 @@ namespace MCGalaxy
             return true;
         }
 
-        private void PasteAnimation(Player p, ushort x, ushort y, ushort z)
+        private void PasteAnimation(Player p, ushort x, ushort y, ushort z, short delay)
         {
             if (!p.Extras.Contains("AnimCopy"))
             {
@@ -1094,15 +1121,32 @@ namespace MCGalaxy
 
             List<AnimBlock> CopyArray = (List<AnimBlock>)p.Extras["AnimCopy"];
             Vec3U16 CopyCoords = (Vec3U16)p.Extras["AnimCopyCoords"];
+
+            int Count = 0;
             foreach (AnimBlock aBlock in CopyArray)
             {
-                AnimBlock tmpCopy = new AnimBlock(aBlock._x, aBlock._y, aBlock._z, aBlock._currentBlock);
-                tmpCopy._loopList = new SortedList<BlockID, AnimLoop>(aBlock._loopList);
+                Count += aBlock._loopList.Count;
+            }
+
+            if (CopyArray.Count + AnimationHandler.dictActiveLevels[p.level.name]._numLoops >= UInt16.MaxValue)
+            {
+                p.Message("Copy too large to paste - animation loop limit reached");
+                return;
+            }
+
+            foreach (AnimBlock aBlock in CopyArray)
+            {
+                AnimBlock tmpCopy = new AnimBlock(aBlock._x, aBlock._y, aBlock._z, aBlock._currentBlock)
+                {
+                    _loopList = new SortedList<BlockID, AnimLoop>(aBlock._loopList)
+                };
 
                 foreach (var kvp in tmpCopy._loopList)
                 {
                     AnimLoop loop = kvp.Value;
-                    AnimationHandler.Place(p.level, (ushort)(x + aBlock._x - CopyCoords.X), (ushort)(y + aBlock._y - CopyCoords.Y), (ushort)(z + aBlock._z - CopyCoords.Z), kvp.Key, loop._stride, loop._width, loop._startTick, loop._endTick, loop._block, false);
+                    AnimationHandler.Place(p.level, (ushort)(x + aBlock._x - CopyCoords.X), (ushort)(y + aBlock._y - CopyCoords.Y), (ushort)(z + aBlock._z - CopyCoords.Z), kvp.Key, loop._stride, loop._width, (short)(loop._startTick + delay), loop._endTick, loop._block, false);
+
+                    AnimationHandler.dictActiveLevels[p.level.name]._numLoops += (ushort)aBlock._loopList.Count;
                 }
             }
         }
@@ -1165,11 +1209,22 @@ namespace MCGalaxy
                 {
                     for (int z = Math.Min(z1, z2); z <= Math.Max(z1, z2); z++)
                     {
+                        List<AnimBlock> hits = mapAnimation._blocks.FindAll(ablock => ablock._x == x && ablock._y == y && ablock._z == z);
+                        foreach (AnimBlock aBlock in hits)
+                        {
+                            mapAnimation._numLoops = (ushort)(mapAnimation._numLoops - aBlock._loopList.Count);
+                        }
+
                         mapAnimation._blocks.RemoveAll(ablock => ablock._x == x && ablock._y == y && ablock._z == z);
                     }
                 }
             }
             AnimationHandler.SendCurrentFrame(p, p.level);
+
+            if (mapAnimation._numLoops == 0)
+            {
+                AnimationHandler.RemoveFromActiveLevels(p.level);
+            }
 
             p.Message("Deleted selection");
         }
@@ -1229,7 +1284,7 @@ namespace MCGalaxy
         }
 
         /*********************************
-         * STOP, START, SHOW, SAVE, INFO *
+         * STOP, START, SAVE, INFO *
          *********************************/
 
         void StopAnim(Level level)
@@ -1246,34 +1301,6 @@ namespace MCGalaxy
             if (AnimationHandler.HasAnims(level))
             {
                 AnimationHandler.dictActiveLevels[level.name].bRunning = true;
-            }
-            return;
-        }
-
-        void ShowAnim(Level level, ref Player p)
-        {
-            if (!p.Extras.Contains("ShowAnim"))
-            {
-                p.Extras["ShowAnim"] = true;
-            }
-
-            if (AnimationHandler.HasAnims(level))
-            {
-                MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
-                if ((bool)p.Extras["ShowAnim"])
-                {
-                    foreach (AnimBlock animBlock in mapAnimation._blocks)
-                    {
-                        p.SendBlockchange(animBlock._x, animBlock._y, animBlock._z, Block.Red);
-                    }
-                    p.Extras["ShowAnim"] = false;
-                    AnimationHandler.SendCurrentFrame(p, level);
-                }
-                else
-                {
-                    p.Extras["ShowAnim"] = true;
-                    AnimationHandler.SendCurrentFrame(p, level);
-                }
             }
             return;
         }
@@ -1332,11 +1359,13 @@ namespace MCGalaxy
             switch (msg)
             {
                 case "4":
-                    p.Message(@"/anim copy");
+                    p.Message(@"/animation copy");
                     p.Message(@"Copies a cuboid of animated blocks");
-                    p.Message(@"/anim paste");
-                    p.Message(@"/pastes your animated block");
-                    p.Message(@"/anim delete z");
+                    p.Message(@"/animation paste");
+                    p.Message(@"Pastes your copy");
+                    p.Message(@"/animation paste delay");
+                    p.Message(@"Pastes your copy with a delay");
+                    p.Message(@"/animation delete z");
                     p.Message(@"Deletes a cuboid of animated blocks");
                     break;
                 case "3":
@@ -1349,7 +1378,7 @@ namespace MCGalaxy
                     p.Message(@"/animation add [num] [stride] [width]");
                     p.Message(@"As above but inserted into a specific index (can overwrite at this index)");
                     p.Message(@"/animation delete [num]");
-                    p.Message(@"Deletes a specific animation in a block without deleting all animations in a block.");
+                    p.Message(@"Deletes a loop in an animation block without deleting all loops in a block.");
                     p.Message(@"/animation swap [num1] [num2]");
                     p.Message(@"Swaps the animation indices. Lower-numbered animations are rendered in front of higher-numbered animations.");
                     p.Message(@"For information on copying and pasting animations, type /help animation 4");
@@ -1359,8 +1388,6 @@ namespace MCGalaxy
                     p.Message(@"Stops the animation in its current state");
                     p.Message(@"/animation start");
                     p.Message(@"Starts the animation in its current state");
-                    p.Message(@"/animation show");
-                    p.Message(@"Shows all animated blocks in red");
                     p.Message(@"/animation delete");
                     p.Message(@"Delete an animated block");
                     p.Message(@"/animation info");
@@ -1390,11 +1417,11 @@ namespace MCGalaxy
                 default:
                     p.Message(@"For a complete explanation use /help animation 0");
                     p.Message(@"/animation [start] [end] [stride] [width]");
-                    p.Message(@"Adds an animation that begins on the start tick and ends on the end tick.");
+                    p.Message(@"Adds an animation that begins on the start tick and ends on the end tick");
                     p.Message(@"/animation [start] [stride] [width]");
                     p.Message(@"Adds an animation that begins on the start tick");
                     p.Message(@"/animation [stride] [width]");
-                    p.Message(@"Adds an animation that begins immediately and never ends.");
+                    p.Message(@"Adds an animation that begins immediately and never ends");
                     p.Message(@"NOTE: a tick is 1/10th of a second)");
                     p.Message(@"For additional information, type /help animation 2");
                     break;
