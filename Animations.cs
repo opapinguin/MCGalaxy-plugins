@@ -1,4 +1,5 @@
 //reference System.dll
+//reference System.Core.dll
 
 using MCGalaxy.Events.LevelEvents;
 using MCGalaxy.Maths;
@@ -10,6 +11,7 @@ using System.IO;
 using BlockID = System.UInt16;
 using BlockRaw = System.Byte;
 using MCGalaxy.Network;
+using System.Linq;
 
 namespace MCGalaxy
 {
@@ -46,12 +48,12 @@ namespace MCGalaxy
     // A single animation loop
     public sealed class AnimLoop
     {
-        public AnimLoop(ushort interval, ushort width, short startTick, ushort endTick, BlockID block)
+        public AnimLoop(ushort interval, ushort duration, short startTick, ushort endTick, BlockID block)
         {
-            this._interval = interval; this._width = width; this._startTick = startTick; this._endTick = endTick; this._block = block;
+            this._interval = interval; this._duration = duration; this._startTick = startTick; this._endTick = endTick; this._block = block;
         }
         public ushort _interval;         // The period of the loop
-        public ushort _width;          // The length of time we keep seeing the loop
+        public ushort _duration;          // The length of time we keep seeing the loop
         public short _startTick;      // Animation offset
         public ushort _endTick;        // Animation end
         public BlockID _block;
@@ -68,7 +70,7 @@ namespace MCGalaxy
         public static ushort TICKS_PER_SECOND = 10;
 
         public override string creator { get { return "Opapinguin"; } }
-        public override string MCGalaxy_Version { get { return "1.9.4.2"; } }
+        public override string MCGalaxy_Version { get { return "1.9.4.0"; } }
         public override string name { get { return "Animations"; } }
 
         SchedulerTask taskSave;
@@ -188,7 +190,7 @@ namespace MCGalaxy
         // Read the animation file for a level if it exists, then sends it to the level's MapAnimation (creates it if it does not exist)
         public static void ReadAnimation(Level level)
         {
-            // File is ordered as <x> <y> <z> <index> <interval> <width> <start> <end> <blockID>
+            // File is ordered as <x> <y> <z> <index> <interval> <duration> <start> <end> <blockID>
             List<String> animFile;
             try
             {
@@ -251,8 +253,8 @@ namespace MCGalaxy
             {
                 foreach (var kvp in animBlock._loopList)
                 {
-                    // File is ordered as <x> <y> <z> <index> <interval> <width> <start> <end> <blockID>
-                    lines.Add(String.Format("{0} {1} {2} {3} {4} {5} {6} {7} {8}", animBlock._x, animBlock._y, animBlock._z, kvp.Key, kvp.Value._interval, kvp.Value._width, kvp.Value._startTick, kvp.Value._endTick, kvp.Value._block));
+                    // File is ordered as <x> <y> <z> <index> <interval> <duration> <start> <end> <blockID>
+                    lines.Add(String.Format("{0} {1} {2} {3} {4} {5} {6} {7} {8}", animBlock._x, animBlock._y, animBlock._z, kvp.Key, kvp.Value._interval, kvp.Value._duration, kvp.Value._startTick, kvp.Value._endTick, kvp.Value._block));
                 }
             }
 
@@ -320,12 +322,13 @@ namespace MCGalaxy
             buffer = new BufferedBlockSender();
         }
 
-        // Keeps track of animations in this level
+        // Keeps track of which (loaded) maps have animations i.e. which maps to handle
         internal static bool HasAnims(Level level)
         {
             return dictActiveLevels.ContainsKey(level.name);
         }
 
+        // Sets the map animation for a level
         internal static void SetAnims(Level level, MapAnimation mapAnim)
         {
             dictActiveLevels[level.name] = mapAnim;
@@ -349,7 +352,16 @@ namespace MCGalaxy
             }
         }
 
-        // Sends current frame block identity. Useful when marking or breaking a block, or on level join event
+        // Sends current animation frame globally, for everyone on the level
+        internal static void SendCurrentFrame(Level level)
+        {
+            foreach (Player pl in level.players)
+            {
+                SendCurrentFrame(pl, level);
+            }
+        }
+
+        // Sends current animation frame. Useful when marking or breaking a block, or on level join event
         internal static void SendCurrentFrame(Player p, Level level)
         {
             BufferedBlockSender sender = new BufferedBlockSender(p);
@@ -482,14 +494,14 @@ namespace MCGalaxy
 
             if (tick > loop._endTick)
             {
-                if (((loop._endTick - loop._startTick) % loop._interval) < loop._width)       // If the block is active during the loop  TODO: See if it should say tick +1 or just tick
+                if (((loop._endTick - loop._startTick) % loop._interval) < loop._duration)       // If the block is active during the loop  TODO: See if it should say tick +1 or just tick
                 {
                     return loop._block;
                 }
                 return System.UInt16.MaxValue;
             }
 
-            if (((tick - loop._startTick) % loop._interval) < loop._width)       // If the block is active during the loop  TODO: See if it should say tick +1 or just tick
+            if (((tick - loop._startTick) % loop._interval) < loop._duration)       // If the block is active during the loop  TODO: See if it should say tick +1 or just tick
             {
                 return loop._block;
             }
@@ -521,14 +533,16 @@ namespace MCGalaxy
         }
 
         // Places a loop in a level. If "all" is set to true, replaces all loops for a block
-        internal static void Place(Level level, ushort x, ushort y, ushort z, ushort idx, ushort interval, ushort width, short startTick, ushort endTick, BlockID block, bool all)
+        internal static void Place(Level level, ushort x, ushort y, ushort z, ushort idx, ushort interval, ushort duration, short startTick, ushort endTick, BlockID block, bool all, bool append)
         {
             ConditionalAddMapAnimation(level);
 
             MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
+            mapAnimation.bRunning = false;
 
             if (mapAnimation._numLoops == ushort.MaxValue)
             {
+                mapAnimation.bRunning = true;
                 return;
             }
 
@@ -536,27 +550,37 @@ namespace MCGalaxy
             {
                 if (animB._x == x && animB._y == y && animB._z == z)
                 {
-                    AnimLoop loop = new AnimLoop(interval, width, startTick, endTick, block);
+                    AnimLoop loop = new AnimLoop(interval, duration, startTick, endTick, block);
 
-                    if (all)
+                    if (all)    // If replacing
                     {
                         mapAnimation._numLoops -= (ushort)animB._loopList.Count;
                         animB._loopList.Clear();
                     }
-
-                    // If idx is maxvalue, it's a special value indicating we fill in the first available key (e.g. for use in /anim add [interval] [wdidth])
-                    if (idx == ushort.MaxValue || idx == 0) // Weird bug happened when idx == 0, where it thinks it's in the keys list
+                    else if (!all && append)     // If appending
                     {
-                        ushort i = 1;
-
-                        while (animB._loopList.Keys.Contains(i))
+                        idx = (ushort)(animB._loopList.Keys.Max() + 1);
+                    }
+                    else if (!all && !append)  // If prepending
+                    {
+                        if (animB._loopList.Keys.Min() == 1)
                         {
-                            i += 1;
+                            // Push everything forward by 1
+                            foreach (ushort k in animB._loopList.Keys.Reverse())
+                            {
+                                AnimLoop copy = new AnimLoop(animB._loopList[k]._interval, animB._loopList[k]._duration,
+                                animB._loopList[k]._startTick, animB._loopList[k]._endTick, animB._loopList[k]._block);
+                                animB._loopList[(ushort)(k + 1)] = copy;
+                                animB._loopList.Remove(k);
+                            }
+
+                            animB._loopList.Remove(1);
                         }
-                        idx = i;
+
+                        idx = (ushort)(animB._loopList.Keys.Min() - 1);
                     }
 
-                    // Replace loop if exists. Otherwise overwrite it
+                    // Replace loop if it already exists with the given index. Otherwise overwrite it
                     if (animB._loopList.Keys.Contains(idx))
                     {
                         animB._loopList[idx] = loop;
@@ -567,24 +591,28 @@ namespace MCGalaxy
                         mapAnimation._numLoops += 1;
                     }
 
+                    mapAnimation.bRunning = true;
                     return;
                 }
             }
 
             // If we're here, it means we're not overwriting a block but creating a new one
             AnimBlock animBlock = new AnimBlock(x, y, z, block);
-            animBlock._loopList.Add(1, new AnimLoop(interval, width, startTick, endTick, block));
+            animBlock._loopList.Add(1, new AnimLoop(interval, duration, startTick, endTick, block));
 
             mapAnimation._blocks.Add(animBlock);
             mapAnimation._numLoops += 1;
+
+            mapAnimation.bRunning = true;
         }
 
         // Deletes a loop in a level. If all is true, deletes all loops for a block
-        internal static void Delete(Level level, ushort x, ushort y, ushort z, ushort idx, bool all)
+        internal static void Delete(Level level, ushort x, ushort y, ushort z, ushort idx, bool all, bool deleteBlock)
         {
             if (!AnimationHandler.HasAnims(level)) return;
 
             MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
+            mapAnimation.bRunning = false;
 
             // Looks like a massive loop but takes no more than O(number of animation blocks) operations
             foreach (AnimBlock animBlock in mapAnimation._blocks)
@@ -600,13 +628,14 @@ namespace MCGalaxy
                     }
 
                     mapAnimation._blocks.Remove(animBlock);
-                    return;
+                    mapAnimation.bRunning = true;
+                    break;
                 }
                 else
                 {
                     foreach (var kvp in animBlock._loopList)    // Find the loop with the specified index and remove only that
                     {
-                        if (kvp.Key == idx)
+                        if ((kvp.Key == idx && deleteBlock == false) || (kvp.Value._block == idx && deleteBlock == true))       // Deletes by block if deleteBlock is true, else by index
                         {
                             animBlock._loopList.Remove(kvp.Key);
 
@@ -620,21 +649,23 @@ namespace MCGalaxy
                             {
                                 ConditionalRemoveMapAnimation(level);
                             }
-                            return;
+                            break;
                         }
                     }
+                    break;
                 }
             }
+            mapAnimation.bRunning = true;
         }
 
         // Adds a loop in a level. Creates animation block for this loop if it does not exist already. If loop index already exists, overwrites it
-        internal static void AddLoop(Level level, ushort x, ushort y, ushort z, ushort index, ushort interval, ushort width, short start, ushort end, BlockID block)
+        internal static void AddLoop(Level level, ushort x, ushort y, ushort z, ushort index, ushort interval, ushort duration, short start, ushort end, BlockID block)
         {
             ConditionalAddMapAnimation(level);
 
             MapAnimation mapAnimation = dictActiveLevels[level.name];
 
-            AnimLoop loop = new AnimLoop(interval, width, start, end, block);
+            AnimLoop loop = new AnimLoop(interval, duration, start, end, block);
 
             // Add loop to an existing animation block if it exists
             foreach (AnimBlock aBlock in mapAnimation._blocks)
@@ -643,7 +674,7 @@ namespace MCGalaxy
                 {
                     if (aBlock._loopList.ContainsKey(index))
                     {
-                        aBlock._loopList[index] = new AnimLoop(interval, width, start, end, block);
+                        aBlock._loopList[index] = new AnimLoop(interval, duration, start, end, block);
                         return;
                     }
                     else
@@ -687,25 +718,80 @@ namespace MCGalaxy
             /******************
              * COMMAND PARSER *
              ******************/
+
+            /* EXTRAS FLAGS */
+            bool bCuboid = false; bool bAll = true; bool bAppend = false;                   // Default behavior
+            List<string> zSynms = new List<string> { "z", "cuboid" };                       // Cuboid synonynms
+            List<string> appSynms = new List<string> { "a", "append" };                     // Append/prepend synonyms
+            List<string> prepSynms = new List<string> { "p", "prepend" };                   // Append/prepend synonyms
+
+            foreach (string arg in args)
+            {
+                if (zSynms.Contains(arg))
+                {
+                    bCuboid = true;
+                }
+
+                if (appSynms.Contains(arg))
+                {
+                    bAll = false;
+                    bAppend = true;
+                }
+
+                if (prepSynms.Contains(arg))
+                {
+                    bAll = false;
+                    bAppend = false;
+                }
+            }
+
+            if (!bCuboid && bAll)
+            {
+                animArgs._commandMode = (ushort)AnimCommandMode.Default;
+            }
+            else if (bCuboid && bAll)
+            {
+                animArgs._commandMode = (ushort)AnimCommandMode.DefaultCuboid;
+            }
+            else if (!bCuboid && bAppend)
+            {
+                animArgs._commandMode = (ushort)AnimCommandMode.Append;
+            }
+            else if (bCuboid && bAppend)
+            {
+                animArgs._commandMode = (ushort)AnimCommandMode.AppendCuboid;
+            }
+            else if (!bCuboid && !bAppend)
+            {
+                animArgs._commandMode = (ushort)AnimCommandMode.Prepend;
+            }
+            else if (bCuboid && !bAppend)
+            {
+                animArgs._commandMode = (ushort)AnimCommandMode.PrependCuboid;
+            }
+
+            args = (args.Where(s => !(zSynms.Contains(s) || appSynms.Contains(s) || prepSynms.Contains(s)))).ToList().ToArray();   // Keep only the non-cuboid, non-append/prepend related args
+
+            /* COMMAND SWITCH */
             switch (args.Length)
             {
-                case 1: // "/anim stop", "/anim start", "/anim delete", "/anim save", "/anim restart", "/anim info", "/anim copy", "/anim paste" (and just "/anim" is also considered length 1)
+                case 1: // "/anim stop", "/anim start", "/anim delete", "/anim save", "/anim restart", "/anim info", "/anim copy", "/anim paste", "/anim reverse", "/anim cut" (and just "/anim" is also considered length 1)
                     if (args[0] == "stop")          // "/anim stop"
                     {
                         StopAnim(p.level);
                         p.Message("Stopped animation");
-                        AnimationHandler.SendCurrentFrame(p, p.level);
+                        AnimationHandler.SendCurrentFrame(p.level);
                     }
                     else if (args[0] == "start")    // "/anim start"
                     {
                         StartAnim(p.level);
                         p.Message("Started animation");
-                        AnimationHandler.SendCurrentFrame(p, p.level);
+                        AnimationHandler.SendCurrentFrame(p.level);
                     }
                     else if (args[0] == "save")     // "/anim save"
                     {
                         AnimationsPlugin.SaveAnimation(p.level);
-                        p.level.Message("Animation saved");
+                        p.level.Message("Saved animations");
                     }
                     else if (args[0] == "delete")   // "/anim delete"
                     {
@@ -713,7 +799,7 @@ namespace MCGalaxy
 
                         animArgs._commandCode = (ushort)AnimCommandCode.Delete;
 
-                        p.MakeSelection(1, animArgs, PlacedMark);
+                        p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
                     }
                     else if (args[0] == "info")     // "/anim info"
                     {
@@ -728,12 +814,19 @@ namespace MCGalaxy
                         p.Message("Restarted animation");
 
                         AnimationHandler.dictActiveLevels[p.level.name]._currentTick = 1;
-                        AnimationHandler.SendCurrentFrame(p, p.level);
+                        AnimationHandler.SendCurrentFrame(p.level);
                     }
                     else if (args[0] == "copy")       // "/anim copy"
                     {
                         p.Message("Mark the bounds of your copy");
                         animArgs._commandCode = (ushort)AnimCommandCode.Copy;
+
+                        p.MakeSelection(2, animArgs, PlacedMark);
+                    }
+                    else if (args[0] == "cut")    // "/anim cut"
+                    {
+                        p.Message("Mark the bounds of your cut");
+                        animArgs._commandCode = (ushort)AnimCommandCode.Cut;
 
                         p.MakeSelection(2, animArgs, PlacedMark);
                     }
@@ -745,13 +838,20 @@ namespace MCGalaxy
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
+                    else if (args[0] == "reverse")    // "/anim reverse"
+                    {
+                        p.Message("Mark where you want to reverse your animation");
+                        animArgs._commandCode = (ushort)AnimCommandCode.Reverse;
+
+                        p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
+                    }
                     else
                     {
                         Help(p);
                         return;
                     }
                     break;
-                case 2: // "/anim [interval] [duration]", "/anim delete [num]", "/anim at [tick]", "/anim delete z", "/anim paste [delay]"
+                case 2: // "/anim [interval] [duration]", "/anim delete [num]", "/anim at [tick]", "/anim paste [delay]", "/anim shift [delay]"
                     ushort interval, duration, num, tick; short delay;
                     if (ushort.TryParse(args[0], out interval) && ushort.TryParse(args[1], out duration))    // "/anim [interval] [duration]"
                     {
@@ -771,11 +871,11 @@ namespace MCGalaxy
                         animArgs._commandCode = (ushort)AnimCommandCode.IntervalDuration;
                         animArgs._duration = duration;
                         animArgs._interval = interval;
-                        animArgs._startTick = 1;
+                        animArgs._startTick = 0;
                         animArgs._endTick = ushort.MaxValue;
                         animArgs._idx = 1;
 
-                        p.MakeSelection(1, animArgs, PlacedMark);
+                        p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
                     }
                     else if (args[0] == "delete" && ushort.TryParse(args[1], out num))                   // "/anim delete [num]"
                     {
@@ -784,21 +884,14 @@ namespace MCGalaxy
                         animArgs._commandCode = (ushort)AnimCommandCode.DeleteNum;
                         animArgs._idx = num;
 
-                        p.MakeSelection(1, animArgs, PlacedMark);
+                        p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
                     }
                     else if (args[0] == "at" && ushort.TryParse(args[1], out tick))        // "/anim at [tick]"
                     {
                         p.Message(String.Format("Set tick to {0}", tick.ToString()));
 
                         AnimationHandler.dictActiveLevels[p.level.name]._currentTick = tick;
-                        AnimationHandler.SendCurrentFrame(p, p.level);
-                    }
-                    else if ((args[0] == "delete") && (args[1] == "cuboid" || args[1] == "z"))       // "/anim delete cuboid" or "/anim delete z"
-                    {
-                        p.Message("Mark the bounds of your selection");
-                        animArgs._commandCode = (ushort)AnimCommandCode.DeleteZ;
-
-                        p.MakeSelection(2, animArgs, PlacedMark);
+                        AnimationHandler.SendCurrentFrame(p.level);
                     }
                     else if (args[0] == "paste" && short.TryParse(args[1], out delay))    // "/anim paste [delay]"
                     {
@@ -809,13 +902,22 @@ namespace MCGalaxy
 
                         p.MakeSelection(1, animArgs, PlacedMark);
                     }
+                    else if (args[0] == "shift" && short.TryParse(args[1], out delay))    // "/anim shift [delay]"
+                    {
+                        p.Message("Mark where you want to delay your animation");
+
+                        animArgs._commandCode = (ushort)AnimCommandCode.Shift;
+                        animArgs._startTick = delay;
+
+                        p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
+                    }
                     else
                     {
                         Help(p);
                         return;
                     }
                     break;
-                case 3: // "/anim swap [num 1] [num 2]", "/anim append [interval] [duration]", "/anim [start] [interval] [duration]", "/anim z [interval [duration]", "/anim delete z [num]"
+                case 3: // "/anim swap [num 1] [num 2]", "/anim [start] [interval] [duration]", "/anim delete block [block]"
                     ushort idx1, idx2; short start;
                     if (args[0] == "swap" && ushort.TryParse(args[1], out idx1) && ushort.TryParse(args[2], out idx2))   // "/anim swap [num 1] [num 2]"
                     {
@@ -825,31 +927,7 @@ namespace MCGalaxy
                         animArgs._idx = idx1;
                         animArgs._idx2 = idx2;
 
-                        p.MakeSelection(1, animArgs, PlacedMark);
-                    }
-                    else if ((args[0] == "append" || args[0] == "a") && ushort.TryParse(args[1], out interval) && ushort.TryParse(args[2], out duration))  // "/anim append [interval] [duration]"
-                    {
-                        if (duration > interval)
-                        {
-                            p.Message("Duration cannot be greater than interval!");
-                            return;
-                        }
-                        else if (duration == 0)
-                        {
-                            p.Message("Duration cannot be 0!");
-                            return;
-                        }
-
-                        p.Message("Mark where you want to place your animation");
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.AppendIntervalDuration;
-                        animArgs._interval = interval;
-                        animArgs._duration = duration;
-                        animArgs._startTick = 1;
-                        animArgs._endTick = ushort.MaxValue;
-                        animArgs._idx = ushort.MaxValue;
-
-                        p.MakeSelection(1, animArgs, PlacedMark);
+                        p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
                     }
                     else if (short.TryParse(args[0], out start) && ushort.TryParse(args[1], out interval) && ushort.TryParse(args[2], out duration))    // "/anim [start] [interval] [duration]"
                     {
@@ -873,35 +951,14 @@ namespace MCGalaxy
                         animArgs._endTick = ushort.MaxValue;
                         animArgs._idx = 1;
 
-                        p.MakeSelection(1, animArgs, PlacedMark);
+                        p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
                     }
-                    else if ((args[0] == "z" || args[0] == "cuboid") && ushort.TryParse(args[1], out interval) && ushort.TryParse(args[2], out duration))        // "/anim z [interval] [duration]"
+                    else if (args[0] == "delete" && args[1] == "block" && Block.Parse(p, args[2]) != Block.Invalid)    // "/anim delete block [block]"
                     {
-                        if (duration > interval)
-                        {
-                            p.Message("Duration cannot be greater than interval");
-                            return;
-                        }
+                        animArgs._commandCode = (ushort)AnimCommandCode.DeleteBlock;
+                        animArgs._idx = Block.ToRaw(Block.Parse(p, args[2]));
 
-                        p.Message("Mark the bounds of your selection");
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.ZIntervalDuration;
-                        animArgs._interval = interval;
-                        animArgs._duration = duration;
-                        animArgs._startTick = 1;
-                        animArgs._endTick = ushort.MaxValue;
-                        animArgs._idx = 1;
-
-                        p.MakeSelection(2, animArgs, PlacedMark);
-                    }
-                    else if (args[0] == "delete" && args[1] == "z" && ushort.TryParse(args[2], out num))    // "/anim delete z [num]"
-                    {
-                        p.Message("Mark the bounds of your selection");
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.DeleteZNum;
-                        animArgs._idx = num;
-
-                        p.MakeSelection(2, animArgs, PlacedMark);
+                        p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
                     }
                     else
                     {
@@ -909,174 +966,9 @@ namespace MCGalaxy
                         return;
                     }
                     break;
-                case 4: // "/anim z [start] [interval] [duration]", "/anim append z [interval] [duration]", "/animation swap z [num 1] [num 2]", "/animation append [start] [interval] [duration]"
-                    if ((args[0] == "z" || args[0] == "cuboid") && short.TryParse(args[1], out start) && ushort.TryParse(args[2], out interval) && ushort.TryParse(args[3], out duration)) // "/anim z [start] [interval] [duration]"
-                    {
-                        if (duration > interval)
-                        {
-                            p.Message("Width cannot be greater than interval!");
-                            return;
-                        }
-                        else if (duration == 0)
-                        {
-                            p.Message("Duration cannot be 0");
-                            return;
-                        }
-
-                        p.Message("Mark the bounds of your selection");
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.ZStartIntervalDuration;
-                        animArgs._startTick = start;
-                        animArgs._endTick = ushort.MaxValue;
-                        animArgs._interval = interval;
-                        animArgs._duration = duration;
-                        animArgs._idx = 1;
-
-                        p.MakeSelection(2, animArgs, PlacedMark);
-                    }
-                    else if ((args[0] == "append" || args[0] == "a") && (args[1] == "z" || args[1] == "cuboid") && ushort.TryParse(args[2], out interval) && ushort.TryParse(args[3], out duration)) // "/anim append z [interval] [duration]"
-                    {
-                        if (duration > interval)
-                        {
-                            p.Message("Duration cannot be greater than interval!");
-                            return;
-                        }
-                        else if (duration == 0)
-                        {
-                            p.Message("Duration cannot be 0!");
-                            return;
-                        }
-
-                        p.Message("Mark where you want to place your animation");
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.AppendZIntervalDuration;
-                        animArgs._interval = interval;
-                        animArgs._duration = duration;
-                        animArgs._startTick = 1;
-                        animArgs._endTick = ushort.MaxValue;
-
-                        p.MakeSelection(2, animArgs, PlacedMark);
-                    }
-                    else if (args[0] == "swap" && (args[1] == "z" || args[1] == "cuboid") && ushort.TryParse(args[2], out idx1) && ushort.TryParse(args[3], out idx2))    // "/anim swap z [num 1] [num 2]"
-                    {
-                        p.Message("Mark where you want to perform your swap");
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.SwapZNum1Num2;
-                        animArgs._idx = idx1;
-                        animArgs._idx2 = idx2;
-
-                        p.MakeSelection(2, animArgs, PlacedMark);
-
-                    }
-                    else if ((args[0] == "append" || args[0] == "a") && short.TryParse(args[1], out start) && ushort.TryParse(args[2], out interval) && ushort.TryParse(args[3], out duration))    // "/anim append [start] [interval] [duration]"
-                    {
-                        p.Message("Mark where you want to perform your swap");
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.AppendStartIntervalDuration;
-                        animArgs._startTick = start;
-                        animArgs._endTick = ushort.MaxValue;
-                        animArgs._interval = interval;
-                        animArgs._duration = duration;
-                        animArgs._idx = ushort.MaxValue;
-
-                        p.MakeSelection(1, animArgs, PlacedMark);
-                    }
-                    else
-                    {
-                        Help(p);
-                        return;
-                    }
-                    break;
-                case 5: // "/anim append z [start] [interval] [duration]", "/anim [start] [block 1] [duration 1] [block 2] [duration 2]"
-                    BlockID block1, block2; ushort duration1, duration2;
-                    if ((args[0] == "append" || args[0] == "a") && (args[1] == "cuboid" || args[1] == "z") && short.TryParse(args[2], out start) && ushort.TryParse(args[3], out interval) && ushort.TryParse(args[4], out duration)) // "/anim append z [start] [interval [duration]"
-                    {
-                        if (duration > interval)
-                        {
-                            p.Message("Duration cannot be greater than interval!");
-                            return;
-                        }
-
-                        if (duration == 0)
-                        {
-                            p.Message("Duration cannot be 0!");
-                            return;
-                        }
-
-                        p.Message("Mark the bounds of your selection");
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.AppendZStartIntervalDuration;
-                        animArgs._interval = interval;
-                        animArgs._duration = duration;
-                        animArgs._startTick = start;
-                        animArgs._endTick = ushort.MaxValue;
-                        animArgs._idx = ushort.MaxValue;
-
-                        p.MakeSelection(2, animArgs, PlacedMark);
-                    }
-                    else if (short.TryParse(args[0], out start) && Block.Parse(p, args[1]) != Block.Invalid && ushort.TryParse(args[2], out duration1)
-                        && Block.Parse(p, args[3]) != Block.Invalid && ushort.TryParse(args[4], out duration2))    // "/anim [start] [block 1] [duration 1] [block 2] [duration 2]"
-                    {
-                        if (duration1 == 0 || duration2 == 0)
-                        {
-                            p.Message("Duration cannot be 0!");
-                            return;
-                        }
-
-                        p.Message("Mark where you want to place your animation");
-
-                        animArgs._durationList = new List<ushort>();
-                        animArgs._blockList = new List<BlockID>();
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.BlockList;
-                        animArgs._durationList.Add(duration1); animArgs._durationList.Add(duration2);
-                        animArgs._blockList.Add(Block.Parse(p, args[1])); animArgs._blockList.Add(Block.Parse(p, args[3]));
-
-                        p.MakeSelection(1, animArgs, PlacedMark);
-                    }
-                    else
-                    {
-                        Help(p);
-                        return;
-                    }
-                    break;
-                default:    // "/anim [start] [block 1] [duration 1] [block 2] [duration 2]...", "/anim z [start] [block 1] [duration 1] [block 2] [duration 2]..."
+                default:    // "/anim [start] [block 1] [duration 1] [block 2] [duration 2]..."
                     ushort temp; animArgs._blockList = new List<BlockID>(); animArgs._durationList = new List<BlockID>();
-                    if (args.Length >= 6 && args.Length % 2 == 0)   // with "z"
-                    {
-                        if (!(args[0] == "z" || args[0] == "cuboid") || !short.TryParse(args[1], out start))
-                        {
-                            Help(p);
-                            break;
-                        }
-
-                        for (int i = 2; i < args.Length - 1; i += 2)
-                        {
-                            if (Block.Parse(p, args[i]) != Block.Invalid && ushort.TryParse(args[i + 1], out temp))
-                            {
-                                animArgs._blockList.Add(Block.Parse(p, args[i]));
-                                animArgs._durationList.Add(temp);
-
-                                if (temp == 0)
-                                {
-                                    p.Message("Duration cannot be 0!");
-                                    return;
-                                }
-                            }
-                            else
-                            {
-                                Help(p);
-                                return;
-                            }
-                        }
-                        p.Message("Mark the bounds of your selection");
-
-                        animArgs._commandCode = (ushort)AnimCommandCode.ZBlockList;
-                        animArgs._startTick = start;
-
-                        p.MakeSelection(2, animArgs, PlacedMark);
-                    }
-                    else if (args.Length >= 5 && args.Length % 2 == 1) // without "z"
+                    if (args.Length >= 5)   // "/anim [start] [block 1] [duration 1] [block 2] [duration 2]..."
                     {
                         if (!short.TryParse(args[0], out start))
                         {
@@ -1102,9 +994,7 @@ namespace MCGalaxy
                         animArgs._commandCode = (ushort)AnimCommandCode.BlockList;
                         animArgs._startTick = start;
 
-                        p.MakeSelection(1, animArgs, PlacedMark);
-
-                        return;
+                        p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
                     }
                     else
                     {
@@ -1119,29 +1009,35 @@ namespace MCGalaxy
         * HELPER FUNCTIONS *
         ********************/
 
-        // Stores info about which command is being accessed
+        // Stores info about which command is being accessed. Maybe not the shortest, but it keeps things organized
         public enum AnimCommandCode : ushort
         {
-            BlockList = 0,
-            ZBlockList = 1,
+            BlockList = 1,
             IntervalDuration = 2,
-            ZIntervalDuration = 3,
-            StartIntervalDuration = 4,
-            ZStartIntervalDuration = 5,
-            Delete = 6,
-            DeleteZ = 7,
-            AppendIntervalDuration = 8,
-            AppendZIntervalDuration = 9,
-            AppendStartIntervalDuration = 10,
-            AppendZStartIntervalDuration = 11,
-            SwapNum1Num2 = 12,
-            SwapZNum1Num2 = 13,
-            DeleteNum = 14,
-            DeleteZNum = 15,
-            Copy = 16,
-            Paste = 17,
-            PasteDelay = 18,
-            Info = 19,
+            StartIntervalDuration = 3,
+            Delete = 4,
+            AppendIntervalDuration = 5,
+            AppendStartIntervalDuration = 6,
+            SwapNum1Num2 = 7,
+            DeleteNum = 8,
+            Copy = 9,
+            Paste = 10,
+            PasteDelay = 11,
+            Info = 12,
+            DeleteBlock = 13,
+            Shift = 14,
+            Reverse = 15,
+            Cut = 16
+        }
+
+        public enum AnimCommandMode : ushort
+        {
+            Default = 1,
+            DefaultCuboid = 2,
+            Append = 3,
+            Prepend = 4,
+            AppendCuboid = 5,
+            PrependCuboid = 6
         }
 
         // Information needed when we mark a block for placing/deleting
@@ -1153,7 +1049,8 @@ namespace MCGalaxy
             public ushort _idx;
             public ushort _idx2;    // Only reserved for swapping
             public ushort _commandCode; // Command code (see above enum)
-            public ushort _endTick;     // NOTE: Legacy, but might come handy in the future
+            public ushort _commandMode; // Command Mode (see above enum)
+            public ushort _endTick;     // NOTE: Legacy
             public List<ushort> _durationList;
             public List<BlockID> _blockList;
         }
@@ -1170,79 +1067,169 @@ namespace MCGalaxy
 
             AnimationArgs animArgs = (AnimationArgs)state;
 
-            switch (animArgs._commandCode)
+            switch (animArgs._commandCode + 100 * animArgs._commandMode)    // Cheap way to pack both arguments into one switch statement
             {
-                case (ushort)AnimCommandCode.BlockList:
-                    PlaceBlockList(p, x, y, z, animArgs._startTick, animArgs._blockList, animArgs._durationList);
+                // "/anim [start] [block 1] [interval 1] [duration 1] [block 2] [interval 2] [duration 2]..."
+                case (ushort)AnimCommandCode.BlockList + 100 * (ushort)AnimCommandMode.Default:
+                    PlaceBlockList(p, x, y, z, animArgs._startTick, animArgs._blockList, animArgs._durationList, true, true);
                     break;
-                case (ushort)AnimCommandCode.ZBlockList:
-                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true);
+                case (ushort)AnimCommandCode.BlockList + 100 * (ushort)AnimCommandMode.DefaultCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true, true);
                     break;
-                case (ushort)AnimCommandCode.IntervalDuration:
-                    PlaceAnimation(p, x, y, z, animArgs, block, true);
+                case (ushort)AnimCommandCode.BlockList + 100 * (ushort)AnimCommandMode.Append:
+                    PlaceBlockList(p, x, y, z, animArgs._startTick, animArgs._blockList, animArgs._durationList, false, true);
                     break;
-                case (ushort)AnimCommandCode.ZIntervalDuration:
-                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true);
+                case (ushort)AnimCommandCode.BlockList + 100 * (ushort)AnimCommandMode.AppendCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false, true);
                     break;
-                case (ushort)AnimCommandCode.StartIntervalDuration:
-                    PlaceAnimation(p, x, y, z, animArgs, block, true);
+                case (ushort)AnimCommandCode.BlockList + 100 * (ushort)AnimCommandMode.Prepend:
+                    PlaceBlockList(p, x, y, z, animArgs._startTick, animArgs._blockList, animArgs._durationList, false, false);
                     break;
-                case (ushort)AnimCommandCode.ZStartIntervalDuration:
-                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true);
+                case (ushort)AnimCommandCode.BlockList + 100 * (ushort)AnimCommandMode.PrependCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false, false);
                     break;
-                case (ushort)AnimCommandCode.Delete:
-                    DeleteAnimation(p, x, y, z, animArgs._idx, true);
+
+                // "/anim [interval] [duration]"
+                case (ushort)AnimCommandCode.IntervalDuration + 100 * (ushort)AnimCommandMode.Default:
+                    PlaceAnimation(p, x, y, z, animArgs, block, true, false);
                     break;
-                case (ushort)AnimCommandCode.DeleteZ:
-                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true);
+                case (ushort)AnimCommandCode.IntervalDuration + 100 * (ushort)AnimCommandMode.DefaultCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true, false);
                     break;
-                case (ushort)AnimCommandCode.AppendIntervalDuration:
-                    PlaceAnimation(p, x, y, z, animArgs, block, false);
+                case (ushort)AnimCommandCode.IntervalDuration + 100 * (ushort)AnimCommandMode.Append:
+                    PlaceAnimation(p, x, y, z, animArgs, block, false, true);
                     break;
-                case (ushort)AnimCommandCode.AppendZIntervalDuration:
-                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false);
+                case (ushort)AnimCommandCode.IntervalDuration + 100 * (ushort)AnimCommandMode.AppendCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false, true);
                     break;
-                case (ushort)AnimCommandCode.AppendStartIntervalDuration:
-                    PlaceAnimation(p, x, y, z, animArgs, block, false);
+                case (ushort)AnimCommandCode.IntervalDuration + 100 * (ushort)AnimCommandMode.Prepend:
+                    PlaceAnimation(p, x, y, z, animArgs, block, false, false);
                     break;
-                case (ushort)AnimCommandCode.AppendZStartIntervalDuration:
-                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false);
+                case (ushort)AnimCommandCode.IntervalDuration + 100 * (ushort)AnimCommandMode.PrependCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false, false);
                     break;
-                case (ushort)AnimCommandCode.SwapNum1Num2:
+
+                // "/anim [start] [interval] [duration]"
+                case (ushort)AnimCommandCode.StartIntervalDuration + 100 * (ushort)AnimCommandMode.Default:
+                    PlaceAnimation(p, x, y, z, animArgs, block, true, false);
+                    break;
+                case (ushort)AnimCommandCode.StartIntervalDuration + 100 * (ushort)AnimCommandMode.DefaultCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true, false);
+                    break;
+                case (ushort)AnimCommandCode.StartIntervalDuration + 100 * (ushort)AnimCommandMode.Append:
+                    PlaceAnimation(p, x, y, z, animArgs, block, false, true);
+                    break;
+                case (ushort)AnimCommandCode.StartIntervalDuration + 100 * (ushort)AnimCommandMode.AppendCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false, true);
+                    break;
+                case (ushort)AnimCommandCode.StartIntervalDuration + 100 * (ushort)AnimCommandMode.Prepend:
+                    PlaceAnimation(p, x, y, z, animArgs, block, false, false);
+                    break;
+                case (ushort)AnimCommandCode.StartIntervalDuration + 100 * (ushort)AnimCommandMode.PrependCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false, false);
+                    break;
+
+                // "/anim delete"
+                case (ushort)AnimCommandCode.Delete + 100 * (ushort)AnimCommandMode.Default:
+                    DeleteAnimation(p, x, y, z, animArgs._idx, true, false);
+                    break;
+                case (ushort)AnimCommandCode.Delete + 100 * (ushort)AnimCommandMode.DefaultCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true, true);
+                    break;
+
+                // "/anim delete block [block]"
+                case (ushort)AnimCommandCode.DeleteBlock + 100 * (ushort)AnimCommandMode.Default:
+                    DeleteAnimation(p, x, y, z, animArgs._idx, false, true);
+                    break;
+                case (ushort)AnimCommandCode.DeleteBlock + 100 * (ushort)AnimCommandMode.DefaultCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false, true);
+                    break;
+
+                // "/anim delete [num]"
+                case (ushort)AnimCommandCode.DeleteNum + 100 * (ushort)AnimCommandMode.Default:
+                    DeleteAnimation(p, x, y, z, animArgs._idx, false, false);
+                    break;
+                case (ushort)AnimCommandCode.DeleteNum + 100 * (ushort)AnimCommandMode.DefaultCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false, true);
+                    break;
+
+                // "/anim swap [num 1] [num 2]"
+                case (ushort)AnimCommandCode.SwapNum1Num2 + 100 * (ushort)AnimCommandMode.Default:
                     SwapAnimation(p, x, y, z, animArgs);
                     break;
-                case (ushort)AnimCommandCode.SwapZNum1Num2:
-                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true);
+                case (ushort)AnimCommandCode.SwapNum1Num2 + 100 * (ushort)AnimCommandMode.DefaultCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true, true);
                     break;
-                case (ushort)AnimCommandCode.DeleteNum:
-                    DeleteAnimation(p, x, y, z, animArgs._idx, false);
-                    break;
-                case (ushort)AnimCommandCode.DeleteZNum:
-                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, false);
-                    break;
-                case (ushort)AnimCommandCode.Copy:
+
+                // "/anim copy"
+                case (ushort)AnimCommandCode.Copy + 100 * (ushort)AnimCommandMode.Default:
                     CopyAnimation(p, x, y, z, x2, y2, z2);
                     break;
-                case (ushort)AnimCommandCode.Paste:
-                    PasteAnimation(p, x, y, z, 0);
+
+                // "/anim cut"
+                case (ushort)AnimCommandCode.Cut + 100 * (ushort)AnimCommandMode.Default:
+                    CopyAnimation(p, x, y, z, x2, y2, z2);
+                    animArgs._commandMode = (ushort)AnimCommandMode.DefaultCuboid;
+                    CuboidCommand((ushort)AnimCommandCode.Delete, p, animArgs, block, x, y, z, x2, y2, z2, true, false);
                     break;
-                case (ushort)AnimCommandCode.PasteDelay:
-                    PasteAnimation(p, x, y, z, animArgs._startTick);
+
+                // "/anim paste"
+                case (ushort)AnimCommandCode.Paste + 100 * (ushort)AnimCommandMode.Default:
+                    PasteAnimation(p, x, y, z, 0, true, true);
                     break;
-                case (ushort)AnimCommandCode.Info:
+                case (ushort)AnimCommandCode.Paste + 100 * (ushort)AnimCommandMode.Append:
+                    PasteAnimation(p, x, y, z, 0, false, true);
+                    break;
+                case (ushort)AnimCommandCode.Paste + 100 * (ushort)AnimCommandMode.Prepend:
+                    PasteAnimation(p, x, y, z, 0, false, false);
+                    break;
+
+                // "/anim reverse"
+                case (ushort)AnimCommandCode.Reverse + 100 * (ushort)AnimCommandMode.Default:
+                    ReverseAnimation(p, x, y, z);
+                    break;
+                case (ushort)AnimCommandCode.Reverse + 100 * (ushort)AnimCommandMode.DefaultCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true, false);
+                    break;
+
+                // "/anim shift"
+                case (ushort)AnimCommandCode.Shift + 100 * (ushort)AnimCommandMode.Default:
+                    ShiftAnimation(p, x, y, z, animArgs._startTick);
+                    break;
+                case (ushort)AnimCommandCode.Shift + 100 * (ushort)AnimCommandMode.DefaultCuboid:
+                    CuboidCommand(animArgs._commandCode, p, animArgs, block, x, y, z, x2, y2, z2, true, false);
+                    break;
+
+                // "/anim paste delay"
+                case (ushort)AnimCommandCode.PasteDelay + 100 * (ushort)AnimCommandMode.Default:
+                    PasteAnimation(p, x, y, z, animArgs._startTick, true, true);
+                    break;
+                case (ushort)AnimCommandCode.PasteDelay + 100 * (ushort)AnimCommandMode.Append:
+                    PasteAnimation(p, x, y, z, animArgs._startTick, false, true);
+                    break;
+                case (ushort)AnimCommandCode.PasteDelay + 100 * (ushort)AnimCommandMode.Prepend:
+                    PasteAnimation(p, x, y, z, animArgs._startTick, false, false);
+                    break;
+
+                // "/anim info"
+                case (ushort)AnimCommandCode.Info + 100 * (ushort)AnimCommandMode.Default:
                     InfoAnim(p, x, y, z);
                     break;
                 default:
                     break;
             }
 
-            AnimationHandler.SendCurrentFrame(p, p.level);
+            AnimationHandler.SendCurrentFrame(p.level);
             return true;
         }
 
-        private void PlaceBlockList(Player p, ushort x, ushort y, ushort z, short start, List<ushort> blockList, List<ushort> durationList)
+        // Places a block list for the lsit commands e.g., "/anim [start] [block 1] [duration 1] [block 2] [duration 2]..."
+        private void PlaceBlockList(Player p, ushort x, ushort y, ushort z, short start, List<ushort> blockList, List<ushort> durationList, bool all, bool append)
         {
-            AnimationHandler.Delete(p.level, x, y, z, 1, true);
+            if (all)
+            {
+                AnimationHandler.Delete(p.level, x, y, z, 1, true, false);
+            }
 
             ushort index = 1;
 
@@ -1252,9 +1239,11 @@ namespace MCGalaxy
                 interval += duration;
             }
 
+            // TODO: Handle all and append
+
             for (int i = 0; i < blockList.Count; i++)
             {
-                AnimationHandler.Place(p.level, x, y, z, index, interval, durationList[i], start, ushort.MaxValue, blockList[i], false);
+                AnimationHandler.Place(p.level, x, y, z, index, interval, durationList[i], start, ushort.MaxValue, blockList[i], false, append);
 
                 start += (short)durationList[i];
                 index += 1;
@@ -1262,7 +1251,7 @@ namespace MCGalaxy
         }
 
         // Compact way to handle essentially the same command across placing, deleting and swapping
-        private void CuboidCommand(ushort commandCode, Player p, AnimationArgs animArgs, BlockID block, ushort x1, ushort y1, ushort z1, ushort x2, ushort y2, ushort z2, bool all)
+        private void CuboidCommand(ushort commandCode, Player p, AnimationArgs animArgs, BlockID block, ushort x1, ushort y1, ushort z1, ushort x2, ushort y2, ushort z2, bool all, bool append)
         {
             for (ushort x = Math.Min(x1, x2); x <= Math.Max(x1, x2); x += 1)
             {
@@ -1272,29 +1261,38 @@ namespace MCGalaxy
                     {
                         switch (commandCode)
                         {
-                            case (ushort)AnimCommandCode.ZBlockList:
-                                PlaceBlockList(p, x, y, z, animArgs._startTick, animArgs._blockList, animArgs._durationList);
+                            case (ushort)AnimCommandCode.BlockList:
+                                PlaceBlockList(p, x, y, z, animArgs._startTick, animArgs._blockList, animArgs._durationList, all, append);
                                 break;
-                            case (ushort)AnimCommandCode.ZIntervalDuration:
-                                PlaceAnimation(p, x, y, z, animArgs, block, all);
+                            case (ushort)AnimCommandCode.IntervalDuration:
+                                PlaceAnimation(p, x, y, z, animArgs, block, all, append);
                                 break;
-                            case (ushort)AnimCommandCode.ZStartIntervalDuration:
-                                PlaceAnimation(p, x, y, z, animArgs, block, all);
+                            case (ushort)AnimCommandCode.StartIntervalDuration:
+                                PlaceAnimation(p, x, y, z, animArgs, block, all, append);
                                 break;
-                            case (ushort)AnimCommandCode.AppendZIntervalDuration:
-                                PlaceAnimation(p, x, y, z, animArgs, block, all);
+                            case (ushort)AnimCommandCode.AppendIntervalDuration:
+                                PlaceAnimation(p, x, y, z, animArgs, block, all, append);
                                 break;
-                            case (ushort)AnimCommandCode.AppendZStartIntervalDuration:
-                                PlaceAnimation(p, x, y, z, animArgs, block, all);
+                            case (ushort)AnimCommandCode.AppendStartIntervalDuration:
+                                PlaceAnimation(p, x, y, z, animArgs, block, all, append);
                                 break;
-                            case (ushort)AnimCommandCode.DeleteZ:
-                                DeleteAnimation(p, x, y, z, animArgs._idx, all);
+                            case (ushort)AnimCommandCode.Delete:
+                                DeleteAnimation(p, x, y, z, animArgs._idx, all, false);
                                 break;
-                            case (ushort)AnimCommandCode.DeleteZNum:
-                                DeleteAnimation(p, x, y, z, animArgs._idx, all);
+                            case (ushort)AnimCommandCode.DeleteNum:
+                                DeleteAnimation(p, x, y, z, animArgs._idx, all, false);
                                 break;
-                            case (ushort)AnimCommandCode.SwapZNum1Num2:
+                            case (ushort)AnimCommandCode.DeleteBlock:
+                                DeleteAnimation(p, x, y, z, animArgs._idx, all, true);
+                                break;
+                            case (ushort)AnimCommandCode.SwapNum1Num2:
                                 SwapAnimation(p, x, y, z, animArgs);
+                                break;
+                            case (ushort)AnimCommandCode.Reverse:
+                                ReverseAnimation(p, x, y, z);
+                                break;
+                            case (ushort)AnimCommandCode.Shift:
+                                ShiftAnimation(p, x, y, z, animArgs._startTick);
                                 break;
                             default:
                                 break;
@@ -1304,7 +1302,97 @@ namespace MCGalaxy
             }
         }
 
-        private void PasteAnimation(Player p, ushort x, ushort y, ushort z, short delay)
+        // Shifts an animation block
+        private void ShiftAnimation(Player p, ushort x, ushort y, ushort z, short delay)
+        {
+            if (!AnimationHandler.HasAnims(p.level))
+            {
+                return;
+            }
+
+            MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[p.level.name];
+            mapAnimation.bRunning = false;
+
+            foreach (AnimBlock aBlock in mapAnimation._blocks)
+            {
+                if (aBlock._x == x && aBlock._y == y && aBlock._z == z)
+                {
+                    foreach (var kvp in aBlock._loopList)
+                    {
+                        kvp.Value._startTick += delay;
+                    }
+                }
+            }
+            mapAnimation.bRunning = true;
+        }
+
+        // Reverses an animation block
+        private void ReverseAnimation(Player p, ushort x, ushort y, ushort z)
+        {
+            if (!AnimationHandler.HasAnims(p.level))
+            {
+                return;
+            }
+
+            MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[p.level.name];
+
+            foreach (AnimBlock aBlock in mapAnimation._blocks)
+            {
+                if (aBlock._x == x && aBlock._y == y && aBlock._z == z)
+                {
+                    // First reverse individual loops
+                    foreach (AnimLoop loop in aBlock._loopList.Values)
+                    {
+                        loop._startTick += (short)(loop._interval - loop._duration);
+                    }
+
+                    // Then reverse the sequence of loops. Idea is basically to get the LCM of the loop lengths, consider
+                    // The "overall" loop to be a loop of length LCM starting on min(tick) and repeating at min(tick+LCM
+                    // Then just reflect the starting times in that range
+                    // TODO: This could make weird changes if LCM gets too big... Doubt it will happen in a practical situation
+
+                    // Get the LCM of the loop lengths
+                    long[] loopLengths = new long[aBlock._loopList.Count];
+                    int i = 0;
+                    short minStartTick = short.MaxValue;
+                    foreach (AnimLoop loop in aBlock._loopList.Values)
+                    {
+                        loopLengths[i] = loop._interval;
+                        if (loop._startTick < minStartTick)
+                        {
+                            minStartTick = loop._startTick;
+                        }
+                        i += 1;
+                    }
+
+                    ushort loopsLCM = (ushort)LCM(loopLengths);
+
+                    // Now start shuffling the inner loops inside the larger loop. You can shuffle them mod their own lengths, which I do here
+                    foreach (AnimLoop loop in aBlock._loopList.Values)
+                    {
+                        loop._startTick = (short)((loop._startTick + loopsLCM - minStartTick) % loop._interval + minStartTick);
+                    }
+                }
+            }
+        }
+
+        // Beautifully compact code I found on StackOverflow:
+        long LCM(long[] numbers)
+        {
+            return numbers.Aggregate(LCM);
+        }
+        long LCM(long a, long b)
+        {
+            return Math.Abs(a * b) / GCD(a, b);
+        }
+        long GCD(long a, long b)
+        {
+            return b == 0 ? a : GCD(b, a % b);
+        }
+
+        // TODO: make this work with append and prepend
+        // Pastes the player's selected animations
+        private void PasteAnimation(Player p, ushort x, ushort y, ushort z, short delay, bool all, bool append)
         {
             if (!p.Extras.Contains("AnimCopy"))
             {
@@ -1335,6 +1423,12 @@ namespace MCGalaxy
                     _loopList = new SortedList<BlockID, AnimLoop>(aBlock._loopList)
                 };
 
+                // If "all" is true, we want to overwrite the animation. Must then delete existing loop first
+                if (all)
+                {
+                    AnimationHandler.Delete(p.level, (ushort)(x + aBlock._x - CopyCoords.X), (ushort)(y + aBlock._y - CopyCoords.Y), (ushort)(z + aBlock._z - CopyCoords.Z), 1, true, false);
+                }
+
                 foreach (var kvp in tmpCopy._loopList)
                 {
                     AnimLoop loop = kvp.Value;
@@ -1343,12 +1437,13 @@ namespace MCGalaxy
                         && y + aBlock._y - CopyCoords.Y >= 0 && y + aBlock._y - CopyCoords.Y < yBound
                         && z + aBlock._z - CopyCoords.Z >= 0 && z + aBlock._z - CopyCoords.Z < zBound)
                     {
-                        AnimationHandler.Place(p.level, (ushort)(x + aBlock._x - CopyCoords.X), (ushort)(y + aBlock._y - CopyCoords.Y), (ushort)(z + aBlock._z - CopyCoords.Z), kvp.Key, loop._interval, loop._width, (short)(loop._startTick + delay), loop._endTick, loop._block, false);
+                        AnimationHandler.Place(p.level, (ushort)(x + aBlock._x - CopyCoords.X), (ushort)(y + aBlock._y - CopyCoords.Y), (ushort)(z + aBlock._z - CopyCoords.Z), kvp.Key, loop._interval, loop._duration, (short)(loop._startTick + delay), loop._endTick, loop._block, false, append);
                     }
                 }
             }
         }
 
+        // Copies the player's selected animations
         private void CopyAnimation(Player p, ushort x1, ushort y1, ushort z1, ushort x2, ushort y2, ushort z2)
         {
             if (Math.Abs(x1 - x2 + 1) * Math.Abs(y1 - y2 + 1) * Math.Abs(z1 - z2 + 1) > 65535)
@@ -1395,9 +1490,9 @@ namespace MCGalaxy
         }
 
         // Deletes an animation block at (x, y, z). If all is true, then we delete all animations at that position. Else delete that of a specific loop within an animation block with index idx
-        private void DeleteAnimation(Player p, ushort x, ushort y, ushort z, ushort idx, bool all)
+        private void DeleteAnimation(Player p, ushort x, ushort y, ushort z, ushort idx, bool all, bool deleteBlock)
         {
-            AnimationHandler.Delete(p.level, x, y, z, idx, all);
+            AnimationHandler.Delete(p.level, x, y, z, idx, all, deleteBlock);
 
             // Also need to remove the blocks from view
             foreach (Player pl in p.level.players)
@@ -1407,9 +1502,9 @@ namespace MCGalaxy
         }
 
         // Places an animation block at (x, y, z)
-        private void PlaceAnimation(Player p, ushort x, ushort y, ushort z, AnimationArgs animArgs, BlockID block, bool all)
+        private void PlaceAnimation(Player p, ushort x, ushort y, ushort z, AnimationArgs animArgs, BlockID block, bool all, bool append)
         {
-            AnimationHandler.Place(p.level, x, y, z, animArgs._idx, animArgs._interval, animArgs._duration, animArgs._startTick, animArgs._endTick, block, all);
+            AnimationHandler.Place(p.level, x, y, z, animArgs._idx, animArgs._interval, animArgs._duration, animArgs._startTick, animArgs._endTick, block, all, append);
         }
 
         // Swaps two loops inside an index. IF a loop doesn't exist, it just changes the key in a straightforward fashion
@@ -1463,7 +1558,7 @@ namespace MCGalaxy
                     else
                     {
                         AnimLoop loop1 = animBlock._loopList[idx1];
-                        AnimLoop tmp = new AnimLoop(loop1._interval, loop1._width, loop1._startTick, loop1._endTick, loop1._block);
+                        AnimLoop tmp = new AnimLoop(loop1._interval, loop1._duration, loop1._startTick, loop1._endTick, loop1._block);
                         animBlock._loopList[idx1] = animBlock._loopList[idx2];
                         animBlock._loopList[idx2] = tmp;
                     }
@@ -1471,9 +1566,9 @@ namespace MCGalaxy
             }
         }
 
-        /*********************************
+        /***************************
          * STOP, START, SAVE, INFO *
-         *********************************/
+         ***************************/
 
         void StopAnim(Level level)
         {
@@ -1522,12 +1617,18 @@ namespace MCGalaxy
                 }
 
                 // If you made it this far the animation block was found and has something to show
-                p.Message("<index> : <interval> <width> <start> <end> <blockID>");
+                p.Message("|index    |interval |duration |start    |end      |blockID  |");
                 AnimLoop currentLoop;
                 foreach (var kvp in selection._loopList)
                 {
                     currentLoop = kvp.Value;
-                    p.Message(String.Format("{0} : <{1}> <{2}> <{3}> <{4}> <{5}>", kvp.Key, currentLoop._interval, currentLoop._width, currentLoop._startTick, currentLoop._endTick, Block.ToRaw(currentLoop._block)));
+                    p.Message(String.Format("|{0}{1}|{2}{3}|{4}{5}|{6}{7}|{8}{9}|{10}{11}|",
+                        kvp.Key, new String(' ', 8 - kvp.Key.ToString().Length),
+                        currentLoop._interval, new String(' ', 8 - currentLoop._interval.ToString().Length),
+                        currentLoop._duration, new String(' ', 8 - currentLoop._duration.ToString().Length),
+                        currentLoop._startTick, new String(' ', 8 - currentLoop._startTick.ToString().Length),
+                        currentLoop._endTick, new String(' ', 8 - currentLoop._endTick.ToString().Length),
+                        Block.ToRaw(currentLoop._block), new String(' ', 8 - Block.ToRaw(currentLoop._block).ToString().Length)));
                 }
             }
             return;
@@ -1548,8 +1649,12 @@ namespace MCGalaxy
             {
                 case "6":
                     p.Message(@"Use append : a ");
+                    p.Message(@"Use prepend : p");
                     p.Message(@"Use cuboid : z");
                     p.Message(@"E.g., /animation a z [start] [interval] [duration]");
+                    p.Message(@"If you see a question mark e.g., ""[z?]"" then that option is optional");
+                    p.Message(@"Add ""z"", ""append"" and/or ""prepend"" to choose the command mode");
+                    p.Message(@"For instance /anim append z [start] [block 1] [duration 1] [block 2] [duration 2]...");
                     break;
                 case "5":
                     p.Message(@"/Animation restart");
@@ -1569,42 +1674,35 @@ namespace MCGalaxy
                 case "4":
                     p.Message(@"/Animation copy");
                     p.Message(@"Copies a cuboid of animation blocks");
-                    p.Message(@"/Animation paste");
-                    p.Message(@"Pastes a cuboid of animation blocks");
-                    p.Message(@"/Animation paste [delay]");
-                    p.Message(@"Pastes a cuboid of animation blocks with a delay");
+                    p.Message(@"/Animation cut");
+                    p.Message(@"Cuts a cuboid of animation blocks");
+                    p.Message(@"/Animation paste [a/p?] [delay?]");
+                    p.Message(@"Pastes your animations with an optional delay");
                     p.Message(@"For miscellaneous animation commands, see /help animation 5");
                     break;
                 case "3":
-                    p.Message(@"/Animation append [interval] [duration]");
-                    p.Message(@"/Animation append z [interval] [duration]");
-                    p.Message(@"Appends animations that starts immediately");
-                    p.Message(@"/Animation append [start] [interval] [duration]");
-                    p.Message(@"/Animation append z [start] [interval] [duration]");
-                    p.Message(@"Appends such animations that starts on a given tick");
-                    p.Message(@"/Animation delete [num]");
-                    p.Message(@"/Animation delete z [num]");
+                    p.Message(@"/Animation delete [z?] [num]");
                     p.Message(@"Deletes animation loops with the given index");
-                    p.Message(@"/Animation swap [num 1] [num 2]");
-                    p.Message(@"/Animation swap z [num 1] [num 2]");
+                    p.Message(@"/animation delete [z?] block [block]");
+                    p.Message(@"Deletes all loops with the given block in it");
+                    p.Message(@"/Animation swap [z?] [num 1] [num 2]");
                     p.Message(@"Swap two loops in an animation block (by index)");
                     p.Message(@"For copying and pasting animations, see /help animation 4");
                     break;
                 case "2":
-                    p.Message(@"/Animation [interval] [duration]");
-                    p.Message(@"/Animation z [interval] [duration]");
-                    p.Message(@"Adds animations that starts immediately");
-                    p.Message(@"/Animation [start] [interval] [duration]");
-                    p.Message(@"/Animation z [start] [interval] [duration]");
-                    p.Message(@"Adds such animations that starts on a given tick");
+                    p.Message(@"/Animation [a/p?] [z?] [start?] [interval] [duration]");
+                    p.Message(@"Create an animation that start on a given tick");
                     p.Message(@"/Animation delete");
-                    p.Message(@"/Animation delete z");
-                    p.Message(@"Delete animation blocks");
-                    p.Message(@"For appending new loops onto existing animation blocks, see /help animation 3");
+                    p.Message(@"Delete an animation block");
+                    p.Message(@"For appending/prepending new loops in front of/behind existing animation blocks, see /help animation 3");
+                    p.Message(@"/Animation [z?] shift [delay]");
+                    p.Message(@"Shifts an animation");
+                    p.Message(@"/Animation reverse [z?]");
+                    p.Message(@"Reverses an animation");
                     break;
                 case "0":
                     p.Message(@"Animations let us create blocks that periodically toggle on and off");
-                    p.Message(@"When a map is loaded it begins a timer that starts at 1 and ticks forward every 10th of a second");
+                    p.Message(@"When a map is loaded it begins a timer that starts at 0 and ticks forward every 10th of a second");
                     p.Message(@"The animation command uses...");
                     p.Message(@"(1) [start] to indicate which tick to start on");
                     p.Message(@"(2) [interval] to indicate the period of the animation");
@@ -1613,14 +1711,15 @@ namespace MCGalaxy
                     p.Message(@"Animation blocks can contain several loops at once. By default we overwrite all loops");
                     p.Message(@"For an animation block with several loops, we render ones with higher indices in front of ones with lower indices");
                     p.Message(@"When these loops are in their ""off"" state, they render the normal block behind them");
-                    p.Message(@"The ""append"" flag gives us more control over how to manipulate loops in the same animation block");
+                    p.Message(@"The ""append/prepend"" (a/p) flag gives us more control over how to manipulate loops in the same animation block");
+                    p.Message(@"They tell us whether to place a loop in front of or behind eisting loops");
+                    p.Message(@"Add ""z"", ""append"" and/or ""prepend"" to choose the command mode");
+                    p.Message(@"For instance /anim append z [start] [block 1] [duration 1] [block 2] [duration 2]...");
                     break;
                 default:
                     p.Message(@"For a complete explanation use /help animation 0");
-                    p.Message(@"/Animation [start] [block 1] [duration 1] [block 2] [duration 2]...");
-                    p.Message(@"Creates an animation block that starts on [start] and repeats the sequence indefinitely");
-                    p.Message(@"/Animation z [start] [block 1] [duration 1] [block 2] [duration 2]...");
-                    p.Message(@"Creates a cuboid of such animation blocks");
+                    p.Message(@"/Animation [a/p?] [z?] [start] [block 1] [duration 1] [block 2] [duration 2]...");
+                    p.Message(@"Creates an animation blocks that starts on [start] and repeats the sequence indefinitely");
                     p.Message(@"For information on how to manipulate loops see /help animation 2");
                     break;
             }
