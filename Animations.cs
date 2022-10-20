@@ -1,5 +1,6 @@
 //reference System.dll
 //reference System.Core.dll
+//reference System.Xml.dll
 
 using MCGalaxy.Events.LevelEvents;
 using MCGalaxy.Maths;
@@ -9,26 +10,70 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using BlockID = System.UInt16;
-using BlockRaw = System.Byte;
 using MCGalaxy.Network;
 using System.Linq;
+using System.Xml;
+using System.Xml.Serialization;
 
 namespace MCGalaxy
 {
     /***********************
     * ANIMATION DATA TYPES *
     ************************/
-    // Contains all the animation blocks for a given map
+    // Contains all the animation blocks for a given map, as well as the task schedulers (they aren't in animation handler because they tick at a per-level rate)
     public sealed class MapAnimation
     {
-        public MapAnimation(bool running, ushort currentTick, ushort numLoops)
-        {
-            this.bRunning = running; this._currentTick = currentTick; this._numLoops = numLoops; this._blocks = new List<AnimBlock>();
-        }
+        public BufferedBlockSender buffer;
+        static readonly ushort DEFAULT_SPEED = 100;
         public bool bRunning;
+        public bool bEditingLock;   // Stops all updates writing/deleting to/from the block list
         public ushort _currentTick;
         public List<AnimBlock> _blocks;
         public ushort _numLoops;
+        public ushort _speed;
+        public bool bKiller;
+
+        private SchedulerTask _task;
+        private readonly Level _level;
+        private Scheduler instance;
+
+        private readonly object activateLock = new object();
+        private readonly object deactivateLock = new object();
+
+        public MapAnimation(bool running, ushort currentTick, ushort numLoops, Level level, ushort speed, bool killer)
+        {
+            bRunning = running; bEditingLock = true; _currentTick = currentTick; _numLoops = numLoops; _blocks = new List<AnimBlock>(); _level = level; _speed = speed; bKiller = killer;
+        }
+
+        public void Activate()
+        {
+            lock (activateLock)
+            {
+                if (instance != null) return;
+                instance = new Scheduler(String.Format("AnimationsScheduler+{0}", _level.name));
+            }
+
+            buffer = new BufferedBlockSender(_level);
+
+            _task = instance.QueueRepeat(AnimationHandler.Update, _level, TimeSpan.FromMilliseconds(DEFAULT_SPEED));
+        }
+        public void Deactivate()
+        {
+            lock (deactivateLock)
+            {
+                if (instance != null)
+                {
+                    instance.Cancel(_task);
+                }
+            }
+            buffer = new BufferedBlockSender();
+        }
+
+        public void SetSpeed(ushort speed)
+        {
+            _speed = speed;
+            _task.Delay = TimeSpan.FromMilliseconds(speed);
+        }
     }
 
     // An animated block at a specific coordinate. Contains animation loops
@@ -65,15 +110,12 @@ namespace MCGalaxy
 
     public class AnimationsPlugin : Plugin
     {
-        public static int SAVE_DELAY = 60 * 15;  // We save all animations every 15 minutes
-        public static string SERVER_PATH = @"/home/mop/PartyZsServer";        // NOTE: YOU NEED TO CHANGE THIS
-        public static ushort TICKS_PER_SECOND = 10;
+        public static string SERVER_PATH = @"C:\Users\laure\Desktop\MCGalaxy-master\bin\Debug";        // NOTE: YOU NEED TO CHANGE THIS
 
         public override string creator { get { return "Opapinguin"; } }
         public override string MCGalaxy_Version { get { return "1.9.4.0"; } }
         public override string name { get { return "Animations"; } }
 
-        SchedulerTask taskSave;
         public override void Load(bool startup)
         {
             CreateAnimsDir();
@@ -82,14 +124,17 @@ namespace MCGalaxy
 
             OnLevelLoadedEvent.Register(HandleLevelLoaded, Priority.Normal);
             OnLevelUnloadEvent.Register(HandleLevelUnload, Priority.Normal);
-            OnPlayerClickEvent.Register(HandlePlayerClick, Priority.Normal);
-            OnJoinedLevelEvent.Register(HandleJoinLevel, Priority.Normal);
             OnLevelSaveEvent.Register(HandleLevelSave, Priority.Normal);
+            OnLevelRenamedEvent.Register(HandleLevelRenamed, Priority.Normal);
+            OnLevelCopiedEvent.Register(HandleLevelCopied, Priority.Normal);
+            OnLevelDeletedEvent.Register(HandleLevelDeleted, Priority.Normal);
 
-            taskSave = Server.MainScheduler.QueueRepeat(SaveAllAnimations, null, TimeSpan.FromSeconds(SAVE_DELAY));
+            OnPlayerClickEvent.Register(HandlePlayerClick, Priority.Normal);
 
-            AnimationHandler.Activate();
+            OnJoinedLevelEvent.Register(HandleJoinedLevel, Priority.Normal);
+
             InitializeAnimDict();
+            AnimationHandler.Activate();
 
             Command.Register(new CmdAnimation());
         }
@@ -98,11 +143,15 @@ namespace MCGalaxy
         {
             OnLevelLoadedEvent.Unregister(HandleLevelLoaded);
             OnLevelUnloadEvent.Unregister(HandleLevelUnload);
-            OnPlayerClickEvent.Unregister(HandlePlayerClick);
-            OnJoinedLevelEvent.Unregister(HandleJoinLevel);
             OnLevelSaveEvent.Unregister(HandleLevelSave);
+            OnLevelRenamedEvent.Unregister(HandleLevelRenamed);
+            OnLevelCopiedEvent.Unregister(HandleLevelCopied);
+            OnLevelDeletedEvent.Unregister(HandleLevelDeleted);
 
-            Server.MainScheduler.Cancel(taskSave);
+            OnPlayerClickEvent.Unregister(HandlePlayerClick);
+
+            OnJoinedLevelEvent.Unregister(HandleJoinedLevel);
+
             AnimationHandler.Deactivate();
 
             Command.Unregister(Command2.Find("Animation"));
@@ -123,6 +172,18 @@ namespace MCGalaxy
                     Logger.Log(LogType.Error, e.StackTrace);
                 }
             }
+            if (!Directory.Exists("AnimationsBackup"))
+            {
+                try
+                {
+                    Directory.CreateDirectory("AnimationsBackup");
+                }
+                catch (Exception e)
+                {
+                    Logger.Log(LogType.Error, "Failed to create AnimationsBackup folder");
+                    Logger.Log(LogType.Error, e.StackTrace);
+                }
+            }
         }
 
         /******************
@@ -136,23 +197,45 @@ namespace MCGalaxy
                 if (File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name)))
                 {
                     ReadAnimation(level);
+                    ReadConfig(level);
                 }
             }
+        }
+
+        private void HandleLevelDeleted(string level)
+        {
+            ConditionalDeleteAnimationFile(level);
+            ConditionalDeleteAnimationConfigFile(level);
+        }
+
+        private void HandleLevelCopied(string srcMap, string dstMap)
+        {
+            RenameAnimation(srcMap, dstMap);
+            RenameAnimationConfig(srcMap, dstMap);
+        }
+
+        private void HandleLevelRenamed(string srcMap, string dstMap)
+        {
+            RenameAnimation(srcMap, dstMap);
+            RenameAnimationConfig(srcMap, dstMap);
         }
 
         private void HandleLevelSave(Level level, ref bool cancel)
         {
             SaveAnimation(level);
+            SaveConfig(level);
             level.Message("Animations saved");
         }
         private void HandleLevelLoaded(Level level)
         {
             ReadAnimation(level);
+            ReadConfig(level);
         }
 
         private void HandleLevelUnload(Level level, ref bool cancel)
         {
             SaveAnimation(level);
+            SaveConfig(level);
             AnimationHandler.RemoveFromActiveLevels(level);
         }
 
@@ -161,7 +244,7 @@ namespace MCGalaxy
             AnimationHandler.SendCurrentFrameBlock(p, x, y, z);
         }
 
-        private void HandleJoinLevel(Player p, Level prevLevel, Level level, ref bool announce)
+        private void HandleJoinedLevel(Player p, Level prevLevel, Level level, ref bool announce)
         {
             AnimationHandler.SendCurrentFrame(p, level);
         }
@@ -176,14 +259,7 @@ namespace MCGalaxy
             foreach (Level level in LevelInfo.Loaded.Items)
             {
                 ReadAnimation(level);
-            }
-        }
-
-        public static void SaveAllAnimations(SchedulerTask task)
-        {
-            foreach (Level level in LevelInfo.Loaded.Items)
-            {
-                SaveAnimation(level);
+                ReadConfig(level);
             }
         }
 
@@ -211,6 +287,9 @@ namespace MCGalaxy
                 return;
             }
 
+            AnimationHandler.ConditionalAddMapAnimation(level);
+            AnimationHandler.dictActiveLevels[level.name].bEditingLock = true;
+
             // Write into the MapAnimation for the level
             foreach (String line in animFile)
             {
@@ -225,6 +304,96 @@ namespace MCGalaxy
                     Logger.Log(LogType.Error, e.StackTrace);
                     return;
                 }
+            }
+
+            AnimationHandler.dictActiveLevels[level.name].bEditingLock = false;
+        }
+
+        // Read properties file for animations
+        public static void ReadConfig(Level level)
+        {
+            if (!File.Exists(String.Format("{0}/Animations/{1}+animationProps.xml", SERVER_PATH, level.name))) { return; }
+
+            if (!AnimationHandler.HasAnims(level)) { return; }
+
+            AnimConfig config;
+            XmlSerializer reader = new XmlSerializer(typeof(AnimConfig));
+            using (var sww = new StreamReader(String.Format("{0}/Animations/{1}+animationProps.xml", SERVER_PATH, level.name)))
+            {
+                config = (AnimConfig)reader.Deserialize(sww);
+            }
+
+            AnimationHandler.dictActiveLevels[level.name].bKiller = config.Killer;
+            AnimationHandler.dictActiveLevels[level.name].SetSpeed(config.Speed);
+        }
+
+        // Save properties file for animations as an XML file
+        public static void SaveConfig(Level level)
+        {
+            if (!AnimationHandler.HasAnims(level)) { return; }
+
+            MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
+
+            var config = new AnimConfig
+            {
+                Killer = mapAnimation.bKiller,
+                Speed = mapAnimation._speed
+            };
+
+            XmlSerializer writer = new XmlSerializer(typeof(AnimConfig));
+            string xml = "";
+            using (var sw = new StreamWriter(String.Format("{0}/Animations/{1}+animationProps.xml", SERVER_PATH, level.name)))
+            {
+                writer.Serialize(sw, config);
+                xml = sw.ToString();
+            }
+        }
+
+        // Renames one [level]+animation.txt to another
+        private void RenameAnimation(string srcMap, string dstMap)
+        {
+            try
+            {
+                if (File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, srcMap)))
+                {
+                    File.Move(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, srcMap),
+                        String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, dstMap));
+                }
+                else
+                {
+                    return;
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.Log(LogType.Error, String.Format("Could not copy {0}/Animations/{1}+animation.txt" +
+                    " into {0}/Animations/{2}+animation.txt", AnimationsPlugin.SERVER_PATH, srcMap, dstMap));
+                Logger.Log(LogType.Error, e.StackTrace);
+                return;
+            }
+        }
+
+        // Renames one [level]+animationProps.xml to another
+        private void RenameAnimationConfig(string srcMap, string dstMap)
+        {
+            try
+            {
+                if (File.Exists(String.Format("{0}/Animations/{1}+animationProps.xml", AnimationsPlugin.SERVER_PATH, srcMap)))
+                {
+                    File.Move(String.Format("{0}/Animations/{1}+animationProps.xml", AnimationsPlugin.SERVER_PATH, srcMap),
+                        String.Format("{0}/Animations/{1}+animationProps.xml", AnimationsPlugin.SERVER_PATH, dstMap));
+                }
+                else
+                {
+                    return;
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.Log(LogType.Error, String.Format("Could not copy {0}/Animations/{1}+animationProps.xml" +
+                    " into {0}/Animations/{2}+animationProps.xml", AnimationsPlugin.SERVER_PATH, srcMap, dstMap));
+                Logger.Log(LogType.Error, e.StackTrace);
+                return;
             }
         }
 
@@ -258,68 +427,121 @@ namespace MCGalaxy
                 }
             }
 
-            File.WriteAllLines(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name), lines.ToArray());     // TODO: Make this async if it turns out slow to write all animations
+            File.WriteAllLines(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name), lines.ToArray());
+        }
+
+        // Write the animation thus far to [level]+animation.txt in ./AnimationsBackup  TODO: Repetition of code, but not sure of an abstract is necessary here
+        public static void SaveAnimationBackup(Level level)
+        {
+            if (!LevelInfo.Loaded.Contains(level))
+            {
+                return;
+            }
+
+            if (!AnimationHandler.HasAnims(level))
+            {
+                return;
+            }
+
+            MapAnimation mapAnim = AnimationHandler.dictActiveLevels[level.name];
+
+            if (mapAnim._numLoops == 0)
+            {
+                return;
+            }
+
+            List<string> lines = new List<string>();
+            foreach (AnimBlock animBlock in mapAnim._blocks)
+            {
+                foreach (var kvp in animBlock._loopList)
+                {
+                    // File is ordered as <x> <y> <z> <index> <interval> <duration> <start> <end> <blockID>
+                    lines.Add(String.Format("{0} {1} {2} {3} {4} {5} {6} {7} {8}", animBlock._x, animBlock._y, animBlock._z, kvp.Key, kvp.Value._interval, kvp.Value._duration, kvp.Value._startTick, kvp.Value._endTick, kvp.Value._block));
+                }
+            }
+
+            File.WriteAllLines(String.Format("{0}/AnimationsBackup/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name), lines.ToArray());
         }
 
         // Deletes the animation file [level]+animation.txt in ./Animations if it exists
-        public static void ConditionalDeleteAnimationFile(Level level)
+        public static void ConditionalDeleteAnimationFile(string level)
         {
             if (AnimationExists(level))
             {
                 try
                 {
-                    File.Delete(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name));
+                    File.Delete(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level));
                 }
                 catch (Exception e)
                 {
-                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"{0}/Animations/{1}+animation.txt\"", AnimationsPlugin.SERVER_PATH, level.name));
+                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"{0}/Animations/{1}+animation.txt\"", AnimationsPlugin.SERVER_PATH, level));
+                    Logger.Log(LogType.Error, e.StackTrace);
+                }
+            }
+        }
+
+
+        // Deletes the animation config file [level]+animationProps.xml in ./Animations if it exists
+        public static void ConditionalDeleteAnimationConfigFile(string level)
+        {
+            if (AnimationExists(level))
+            {
+                try
+                {
+                    File.Delete(String.Format("{0}/Animations/{1}+animationProps.xml", AnimationsPlugin.SERVER_PATH, level));
+                }
+                catch (Exception e)
+                {
+                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"{0}/Animations/{1}+animationProps.xml\"", AnimationsPlugin.SERVER_PATH, level));
                     Logger.Log(LogType.Error, e.StackTrace);
                 }
             }
         }
 
         // Checks if [level]+animations.txt exists in ./Animations
-        public static bool AnimationExists(Level level)
+        public static bool AnimationExists(string level)
         {
-            return File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name));
+            return File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level));
         }
 
     }
+
+    /**********
+     * CONFIG *
+     **********/
+
+    public sealed class AnimConfig
+    {
+        public ushort Speed { get; set; }
+        public bool Killer { get; set; }
+    }
+
+    /*********************
+     * ANIMATION HANDLER *
+     *********************/
 
     // Handles animation scheduling across maps as well as adding loops to/removing loops from animations in these maps
     // Note that we need to keep maps in this static class, because maps are not passed around by reference but rather many instances
     // Are made for each player, so that using the ExtrasCollection for each map will not be viable
     public static class AnimationHandler
     {
-        static Scheduler instance;
-        static readonly object activateLock = new object();
-        static readonly object deactivateLock = new object();
-        static SchedulerTask task;
-        static BufferedBlockSender buffer = new BufferedBlockSender();
         public static Dictionary<string, MapAnimation> dictActiveLevels = new Dictionary<string, MapAnimation>();  // Levels with map animations
 
         internal static void Activate()
         {
-            lock (activateLock)
+            foreach (var kvp in dictActiveLevels)
             {
-                if (instance != null) return;
-
-                instance = new Scheduler("AnimationScheduler");
-                task = instance.QueueRepeat(AnimationsTick, null, TimeSpan.FromMilliseconds(1000 / AnimationsPlugin.TICKS_PER_SECOND));
+                kvp.Value.Activate();
             }
         }
 
         internal static void Deactivate()
         {
-            lock (deactivateLock)
+            foreach (var kvp in dictActiveLevels)
             {
-                if (instance != null)
-                {
-                    instance.Cancel(task);
-                }
+                kvp.Value.Deactivate();
             }
             dictActiveLevels.Clear();
-            buffer = new BufferedBlockSender();
         }
 
         // Keeps track of which (loaded) maps have animations i.e. which maps to handle
@@ -332,6 +554,7 @@ namespace MCGalaxy
         internal static void SetAnims(Level level, MapAnimation mapAnim)
         {
             dictActiveLevels[level.name] = mapAnim;
+            dictActiveLevels[level.name].Activate();
         }
 
         // Removes a level from the active levels
@@ -339,16 +562,8 @@ namespace MCGalaxy
         {
             if (HasAnims(level))
             {
+                dictActiveLevels[level.name].Deactivate();
                 dictActiveLevels.Remove(level.name);
-            }
-        }
-
-        // Handles animation across all maps
-        static void AnimationsTick(SchedulerTask task)
-        {
-            foreach (var kvp in dictActiveLevels)
-            {
-                Update(kvp.Key);
             }
         }
 
@@ -424,13 +639,12 @@ namespace MCGalaxy
         }
 
         // Handles animation on a single map
-        static void Update(string level)
+        internal static void Update(SchedulerTask task)
         {
-            MapAnimation mapAnimation = dictActiveLevels[level];
-            Level currentLevel = LevelInfo.FindExact(level);
-            if (mapAnimation.bRunning)
+            Level currentLevel = (Level)task.State;
+            MapAnimation mapAnimation = dictActiveLevels[currentLevel.name];
+            if (mapAnimation.bRunning && !mapAnimation.bEditingLock)
             {
-                buffer.level = currentLevel;
                 foreach (AnimBlock animBlock in mapAnimation._blocks)
                 {
                     BlockID prevBlock = animBlock._currentBlock;    // Previous frame's block
@@ -449,14 +663,14 @@ namespace MCGalaxy
 
                     int index = currentLevel.PosToInt((ushort)animBlock._x, (ushort)animBlock._y, (ushort)animBlock._z);
 
-                    buffer.Add(index, currentBlock);
+                    mapAnimation.buffer.Add(index, currentBlock);
 
                     animBlock._currentBlock = currentBlock;
                 }
 
-                if (buffer.count != 0)
+                if (mapAnimation.buffer.count != 0)
                 {
-                    buffer.Flush();
+                    mapAnimation.buffer.Flush();
                 }
 
                 mapAnimation._currentTick += 1;
@@ -494,14 +708,14 @@ namespace MCGalaxy
 
             if (tick > loop._endTick)
             {
-                if (((loop._endTick - loop._startTick) % loop._interval) < loop._duration)       // If the block is active during the loop  TODO: See if it should say tick +1 or just tick
+                if (((loop._endTick - loop._startTick) % loop._interval) < loop._duration)       // If the block is active during the loop
                 {
                     return loop._block;
                 }
                 return System.UInt16.MaxValue;
             }
 
-            if (((tick - loop._startTick) % loop._interval) < loop._duration)       // If the block is active during the loop  TODO: See if it should say tick +1 or just tick
+            if (((tick - loop._startTick) % loop._interval) < loop._duration)       // If the block is active during the loop
             {
                 return loop._block;
             }
@@ -510,11 +724,11 @@ namespace MCGalaxy
         }
 
         // Initializes a map animation if it does not already exist. Adds it to the active levels
-        private static void ConditionalAddMapAnimation(Level level)
+        internal static void ConditionalAddMapAnimation(Level level)
         {
             if (!HasAnims(level))
             {
-                MapAnimation mapAnimation = new MapAnimation(true, 0, 0)
+                MapAnimation mapAnimation = new MapAnimation(true, 0, 0, level, 100, false)
                 {
                     _blocks = new List<AnimBlock>()
                 };
@@ -538,11 +752,11 @@ namespace MCGalaxy
             ConditionalAddMapAnimation(level);
 
             MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
-            mapAnimation.bRunning = false;
+            mapAnimation.bEditingLock = true;
 
             if (mapAnimation._numLoops == ushort.MaxValue)
             {
-                mapAnimation.bRunning = true;
+                mapAnimation.bEditingLock = false;
                 return;
             }
 
@@ -591,7 +805,7 @@ namespace MCGalaxy
                         mapAnimation._numLoops += 1;
                     }
 
-                    mapAnimation.bRunning = true;
+                    mapAnimation.bEditingLock = false;
                     return;
                 }
             }
@@ -603,7 +817,7 @@ namespace MCGalaxy
             mapAnimation._blocks.Add(animBlock);
             mapAnimation._numLoops += 1;
 
-            mapAnimation.bRunning = true;
+            mapAnimation.bEditingLock = false;
         }
 
         // Deletes a loop in a level. If all is true, deletes all loops for a block
@@ -612,7 +826,7 @@ namespace MCGalaxy
             if (!AnimationHandler.HasAnims(level)) return;
 
             MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[level.name];
-            mapAnimation.bRunning = false;
+            mapAnimation.bEditingLock = true;
 
             // Looks like a massive loop but takes no more than O(number of animation blocks) operations
             foreach (AnimBlock animBlock in mapAnimation._blocks)
@@ -628,7 +842,7 @@ namespace MCGalaxy
                     }
 
                     mapAnimation._blocks.Remove(animBlock);
-                    mapAnimation.bRunning = true;
+                    mapAnimation.bEditingLock = false;
                     break;
                 }
                 else
@@ -655,7 +869,7 @@ namespace MCGalaxy
                     break;
                 }
             }
-            mapAnimation.bRunning = true;
+            mapAnimation.bEditingLock = false;
         }
 
         // Adds a loop in a level. Creates animation block for this loop if it does not exist already. If loop index already exists, overwrites it
@@ -680,7 +894,6 @@ namespace MCGalaxy
                     else
                     {
                         aBlock._loopList.Add(index, loop);
-                        // TODO: Maybe set the animation block's current block here
                         mapAnimation._numLoops += 1;
                         return;
                     }
@@ -775,7 +988,7 @@ namespace MCGalaxy
             /* COMMAND SWITCH */
             switch (args.Length)
             {
-                case 1: // "/anim stop", "/anim start", "/anim delete", "/anim save", "/anim restart", "/anim info", "/anim copy", "/anim paste", "/anim reverse", "/anim cut" (and just "/anim" is also considered length 1)
+                case 1: // "/anim stop", "/anim start", "/anim delete", "/anim save", "/anim restart", "/anim info", "/anim copy", "/anim paste", "/anim reverse", "/anim cut", "/anim backup" (and just "/anim" is also considered length 1)
                     if (args[0] == "stop")          // "/anim stop"
                     {
                         StopAnim(p.level);
@@ -791,6 +1004,7 @@ namespace MCGalaxy
                     else if (args[0] == "save")     // "/anim save"
                     {
                         AnimationsPlugin.SaveAnimation(p.level);
+                        AnimationsPlugin.SaveConfig(p.level);
                         p.level.Message("Saved animations");
                     }
                     else if (args[0] == "delete")   // "/anim delete"
@@ -845,13 +1059,18 @@ namespace MCGalaxy
 
                         p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
                     }
+                    else if (args[0] == "backup")     // "/anim backup"
+                    {
+                        AnimationsPlugin.SaveAnimationBackup(p.level);
+                        p.Message("Created backup");
+                    }
                     else
                     {
                         Help(p);
                         return;
                     }
                     break;
-                case 2: // "/anim [interval] [duration]", "/anim delete [num]", "/anim at [tick]", "/anim paste [delay]", "/anim shift [delay]"
+                case 2: // "/anim [interval] [duration]", "/anim delete [num]", "/anim at [tick]", "/anim paste [delay]", "/anim shift [delay]", "/anim speed [ms]"
                     ushort interval, duration, num, tick; short delay;
                     if (ushort.TryParse(args[0], out interval) && ushort.TryParse(args[1], out duration))    // "/anim [interval] [duration]"
                     {
@@ -911,6 +1130,17 @@ namespace MCGalaxy
 
                         p.MakeSelection(bCuboid ? 2 : 1, animArgs, PlacedMark);
                     }
+                    else if (args[0] == "speed" && ushort.TryParse(args[1], out num))     // "/anim speed [ms]"
+                    {
+                        if (num < 50)
+                        {
+                            p.Message("Num cannot be less than 50");
+                            return;
+                        }
+
+                        AnimationHandler.dictActiveLevels[p.level.name].SetSpeed(num);
+                        p.Message(String.Format("Speed changed to {0}", num.ToString()));
+                    }
                     else
                     {
                         Help(p);
@@ -955,6 +1185,8 @@ namespace MCGalaxy
                     }
                     else if (args[0] == "delete" && args[1] == "block" && Block.Parse(p, args[2]) != Block.Invalid)    // "/anim delete block [block]"
                     {
+                        p.Message("Mark where you want to delete your animation");
+
                         animArgs._commandCode = (ushort)AnimCommandCode.DeleteBlock;
                         animArgs._idx = Block.ToRaw(Block.Parse(p, args[2]));
 
@@ -1223,7 +1455,7 @@ namespace MCGalaxy
             return true;
         }
 
-        // Places a block list for the lsit commands e.g., "/anim [start] [block 1] [duration 1] [block 2] [duration 2]..."
+        // Places a block list for the list commands e.g., "/anim [start] [block 1] [duration 1] [block 2] [duration 2]..."
         private void PlaceBlockList(Player p, ushort x, ushort y, ushort z, short start, List<ushort> blockList, List<ushort> durationList, bool all, bool append)
         {
             if (all)
@@ -1238,8 +1470,6 @@ namespace MCGalaxy
             {
                 interval += duration;
             }
-
-            // TODO: Handle all and append
 
             for (int i = 0; i < blockList.Count; i++)
             {
@@ -1311,7 +1541,7 @@ namespace MCGalaxy
             }
 
             MapAnimation mapAnimation = AnimationHandler.dictActiveLevels[p.level.name];
-            mapAnimation.bRunning = false;
+            mapAnimation.bEditingLock = true;
 
             foreach (AnimBlock aBlock in mapAnimation._blocks)
             {
@@ -1323,7 +1553,7 @@ namespace MCGalaxy
                     }
                 }
             }
-            mapAnimation.bRunning = true;
+            mapAnimation.bEditingLock = false;
         }
 
         // Reverses an animation block
@@ -1584,6 +1814,7 @@ namespace MCGalaxy
             if (AnimationHandler.HasAnims(level))
             {
                 AnimationHandler.dictActiveLevels[level.name].bRunning = true;
+                AnimationHandler.dictActiveLevels[level.name].bEditingLock = false;     // If this for some reason became "true" can turn it off here
             }
             return;
         }
@@ -1648,79 +1879,83 @@ namespace MCGalaxy
             switch (msg)
             {
                 case "6":
-                    p.Message(@"Use append : a ");
-                    p.Message(@"Use prepend : p");
-                    p.Message(@"Use cuboid : z");
-                    p.Message(@"E.g., /animation a z [start] [interval] [duration]");
-                    p.Message(@"If you see a question mark e.g., ""[z?]"" then that option is optional");
-                    p.Message(@"Add ""z"", ""append"" and/or ""prepend"" to choose the command mode");
-                    p.Message(@"For instance /anim append z [start] [block 1] [duration 1] [block 2] [duration 2]...");
+                    p.Message(@"%EUse append : a ");
+                    p.Message(@"%EUse prepend : p");
+                    p.Message(@"%EUse cuboid : z");
+                    p.Message(@"%EE.g., /animation a z [start] [interval] [duration]");
+                    p.Message(@"%EIf you see a question mark e.g., ""[z?]"" then that option is optional");
+                    p.Message(@"%EAdd ""z"", ""append"" and/or ""prepend"" to choose the command mode");
+                    p.Message(@"%EFor instance /anim a z [start] [block 1] [duration 1] [block 2] [duration 2]...");
                     break;
                 case "5":
-                    p.Message(@"/Animation restart");
-                    p.Message(@"Restarts an animation");
-                    p.Message(@"/Animation at [tick]");
-                    p.Message(@"Moves the counter to the given tick");
-                    p.Message(@"Animation stop");
-                    p.Message(@"Pauses the animation");
-                    p.Message(@"Animation start");
-                    p.Message(@"Continues your animation");
-                    p.Message(@"/Animation info");
-                    p.Message(@"Gets the info about an animation block");
-                    p.Message(@"/Animation save");
-                    p.Message(@"Saves an animation");
-                    p.Message(@"For shortcuts, see /help animation 6");
+                    p.Message(@"%T/Animation restart");
+                    p.Message(@"%ERestarts an animation");
+                    p.Message(@"%T/Animation at [tick]");
+                    p.Message(@"%EMoves the counter to the given tick");
+                    p.Message(@"%EAnimation stop");
+                    p.Message(@"%EPauses the animation");
+                    p.Message(@"%EAnimation start");
+                    p.Message(@"%EContinues your animation");
+                    p.Message(@"%T/Animation info");
+                    p.Message(@"%EGets the info about an animation block");
+                    p.Message(@"%T/Animation save");
+                    p.Message(@"%ESaves an animation");
+                    p.Message(@"%EFor shortcuts, see /help animation 6");
+                    p.Message(@"%T/Animation speed [ms]");
+                    p.Message(@"%EChange animation speed. Default is 100=1/10th of a second");
+                    p.Message(@"%T/Animation backup");
+                    p.Message(@"%ECreates a backup of your animation. Can only have 1 backup at a time");
                     break;
                 case "4":
-                    p.Message(@"/Animation copy");
-                    p.Message(@"Copies a cuboid of animation blocks");
-                    p.Message(@"/Animation cut");
-                    p.Message(@"Cuts a cuboid of animation blocks");
-                    p.Message(@"/Animation paste [a/p?] [delay?]");
-                    p.Message(@"Pastes your animations with an optional delay");
-                    p.Message(@"For miscellaneous animation commands, see /help animation 5");
+                    p.Message(@"%T/Animation copy");
+                    p.Message(@"%ECopies a cuboid of animation blocks");
+                    p.Message(@"%T/Animation cut");
+                    p.Message(@"%ECuts a cuboid of animation blocks");
+                    p.Message(@"%T/Animation paste [a/p?] [delay?]");
+                    p.Message(@"%EPastes your animations with an optional delay");
+                    p.Message(@"%EFor miscellaneous animation commands, see /help animation 5");
                     break;
                 case "3":
-                    p.Message(@"/Animation delete [z?] [num]");
-                    p.Message(@"Deletes animation loops with the given index");
-                    p.Message(@"/animation delete [z?] block [block]");
-                    p.Message(@"Deletes all loops with the given block in it");
-                    p.Message(@"/Animation swap [z?] [num 1] [num 2]");
-                    p.Message(@"Swap two loops in an animation block (by index)");
-                    p.Message(@"For copying and pasting animations, see /help animation 4");
+                    p.Message(@"%T/Animation delete [z?] [num]");
+                    p.Message(@"%EDeletes animation loops with the given index");
+                    p.Message(@"%T/Animation delete [z?] block [block]");
+                    p.Message(@"%EDeletes all loops with the given block in it");
+                    p.Message(@"%T/Animation swap [z?] [num 1] [num 2]");
+                    p.Message(@"%ESwap two loops in an animation block (by index)");
+                    p.Message(@"%EFor copying and pasting animations, see /help animation 4");
                     break;
                 case "2":
-                    p.Message(@"/Animation [a/p?] [z?] [start?] [interval] [duration]");
-                    p.Message(@"Create an animation that start on a given tick");
-                    p.Message(@"/Animation delete");
-                    p.Message(@"Delete an animation block");
-                    p.Message(@"For appending/prepending new loops in front of/behind existing animation blocks, see /help animation 3");
-                    p.Message(@"/Animation [z?] shift [delay]");
-                    p.Message(@"Shifts an animation");
-                    p.Message(@"/Animation reverse [z?]");
-                    p.Message(@"Reverses an animation");
+                    p.Message(@"%T/Animation [a/p?] [z?] [start?] [interval] [duration]");
+                    p.Message(@"%ECreate an animation that start on a given tick");
+                    p.Message(@"%T/Animation delete");
+                    p.Message(@"%EDelete an animation block");
+                    p.Message(@"%T/Animation [z?] shift [delay]");
+                    p.Message(@"%EShifts an animation");
+                    p.Message(@"%T/Animation reverse [z?]");
+                    p.Message(@"%EReverses an animation");
+                    p.Message(@"%EFor appending/prepending new loops in front of/behind existing animation blocks, see /help animation 3");
                     break;
                 case "0":
-                    p.Message(@"Animations let us create blocks that periodically toggle on and off");
-                    p.Message(@"When a map is loaded it begins a timer that starts at 0 and ticks forward every 10th of a second");
-                    p.Message(@"The animation command uses...");
-                    p.Message(@"(1) [start] to indicate which tick to start on");
-                    p.Message(@"(2) [interval] to indicate the period of the animation");
-                    p.Message(@"(3) [duration] to indicate the length of time the block will be visible");
-                    p.Message(@"Animations are such loops that are put into animation blocks");
-                    p.Message(@"Animation blocks can contain several loops at once. By default we overwrite all loops");
-                    p.Message(@"For an animation block with several loops, we render ones with higher indices in front of ones with lower indices");
-                    p.Message(@"When these loops are in their ""off"" state, they render the normal block behind them");
-                    p.Message(@"The ""append/prepend"" (a/p) flag gives us more control over how to manipulate loops in the same animation block");
-                    p.Message(@"They tell us whether to place a loop in front of or behind eisting loops");
-                    p.Message(@"Add ""z"", ""append"" and/or ""prepend"" to choose the command mode");
-                    p.Message(@"For instance /anim append z [start] [block 1] [duration 1] [block 2] [duration 2]...");
+                    p.Message(@"%EAnimations let us create blocks that periodically toggle on and off");
+                    p.Message(@"%EWhen a map is loaded it begins a timer that starts at 0 and ticks forward every 10th of a second");
+                    p.Message(@"%EThe animation command uses...");
+                    p.Message(@"%E(1) [start] to indicate which tick to start on");
+                    p.Message(@"%E(2) [interval] to indicate the period of the animation");
+                    p.Message(@"%E(3) [duration] to indicate the length of time the block will be visible");
+                    p.Message(@"%EAnimations are such loops that are put into animation blocks");
+                    p.Message(@"%EAnimation blocks can contain several loops at once. By default we overwrite all loops");
+                    p.Message(@"%EFor an animation block with several loops, we render ones with higher indices in front of ones with lower indices");
+                    p.Message(@"%EWhen these loops are in their ""off"" state, they render the normal block behind them");
+                    p.Message(@"%EThe ""append/prepend"" (a/p) flag gives us more control over how to manipulate loops in the same animation block");
+                    p.Message(@"%EThey tell us whether to place a loop in front of or behind eisting loops");
+                    p.Message(@"%EAdd ""z"", ""append"" and/or ""prepend"" to choose the command mode");
+                    p.Message(@"%EFor instance /anim append z [start] [block 1] [duration 1] [block 2] [duration 2]...");
                     break;
                 default:
-                    p.Message(@"For a complete explanation use /help animation 0");
-                    p.Message(@"/Animation [a/p?] [z?] [start] [block 1] [duration 1] [block 2] [duration 2]...");
-                    p.Message(@"Creates an animation blocks that starts on [start] and repeats the sequence indefinitely");
-                    p.Message(@"For information on how to manipulate loops see /help animation 2");
+                    p.Message(@"%EFor a complete explanation use /help animation 0");
+                    p.Message(@"%T/Animation [a/p?] [z?] [start] [block 1] [duration 1] [block 2] [duration 2]...");
+                    p.Message(@"%ECreates an animation blocks that starts on [start] and repeats the sequence indefinitely");
+                    p.Message(@"%EFor information on how to manipulate loops see /help animation 2");
                     break;
             }
         }
