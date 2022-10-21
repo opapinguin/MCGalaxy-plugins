@@ -2,6 +2,9 @@
 //reference System.Core.dll
 //reference System.Xml.dll
 
+// REMEMBER TO CHANGE THE SERVER_PATH VARIABLE
+// Thanks goes out to D_Flat for suggesting the way to write the command, in a way I think is absolutely perfect
+
 using MCGalaxy.Events.LevelEvents;
 using MCGalaxy.Maths;
 using MCGalaxy.Tasks;
