@@ -12,8 +12,8 @@ using System.IO;
 using BlockID = System.UInt16;
 using MCGalaxy.Network;
 using System.Linq;
-using System.Xml;
 using System.Xml.Serialization;
+using MCGalaxy.Blocks;
 
 namespace MCGalaxy
 {
@@ -67,6 +67,7 @@ namespace MCGalaxy
                 }
             }
             buffer = new BufferedBlockSender();
+            _blocks = new List<AnimBlock>();
         }
 
         public void SetSpeed(ushort speed)
@@ -110,7 +111,7 @@ namespace MCGalaxy
 
     public class AnimationsPlugin : Plugin
     {
-        public static string SERVER_PATH = @"C:\Users\laure\Desktop\MCGalaxy-master\bin\Debug";        // NOTE: YOU NEED TO CHANGE THIS
+        public static string SERVER_PATH = @"";        // NOTE: YOU NEED TO CHANGE THIS
 
         public override string creator { get { return "Opapinguin"; } }
         public override string MCGalaxy_Version { get { return "1.9.4.0"; } }
@@ -341,11 +342,10 @@ namespace MCGalaxy
             };
 
             XmlSerializer writer = new XmlSerializer(typeof(AnimConfig));
-            string xml = "";
             using (var sw = new StreamWriter(String.Format("{0}/Animations/{1}+animationProps.xml", SERVER_PATH, level.name)))
             {
                 writer.Serialize(sw, config);
-                xml = sw.ToString();
+                string xml = sw.ToString();
             }
         }
 
@@ -668,9 +668,19 @@ namespace MCGalaxy
                     animBlock._currentBlock = currentBlock;
                 }
 
+                // Handle remaining blocks
                 if (mapAnimation.buffer.count != 0)
                 {
                     mapAnimation.buffer.Flush();
+                }
+
+                // Handle death
+                if (mapAnimation.bKiller)
+                {
+                    foreach (Player pl in currentLevel.players)
+                    {
+                        Walkthrough(pl, pl.ModelBB.OffsetPosition(pl.Pos), mapAnimation._currentTick, mapAnimation);
+                    }
                 }
 
                 mapAnimation._currentTick += 1;
@@ -680,6 +690,54 @@ namespace MCGalaxy
                     mapAnimation._currentTick = 0;
                 }
             }
+        }
+
+        // Handles walkthrough, checks if player dies
+        internal static void Walkthrough(Player p, AABB bb, ushort tick, MapAnimation mapAnim)
+        {
+            Vec3S32 min = bb.BlockMin, max = bb.BlockMax;
+            bool hitWalkthrough = false;
+
+            for (int y = min.Y; y <= max.Y; y++)
+                for (int z = min.Z; z <= max.Z; z++)
+                    for (int x = min.X; x <= max.X; x++)
+                    {
+                        ushort xP = (ushort)x, yP = (ushort)y, zP = (ushort)z;
+                        BlockID block = AnimationHandler.GetCurrentBlock(mapAnim, xP, yP, zP, tick);
+                        if (block == System.UInt16.MaxValue) continue;
+
+                        AABB blockBB = Block.BlockAABB(block, p.level).Offset(x * 32, y * 32, z * 32);
+                        if (!AABB.Intersects(ref bb, ref blockBB)) continue;
+
+                        // We can activate only one walkthrough block per movement
+                        if (!hitWalkthrough)
+                        {
+                            HandleWalkthrough handler = p.level.WalkthroughHandlers[block];
+                            if (handler != null && handler(p, block, xP, yP, zP))
+                            {
+                                hitWalkthrough = true;
+                            }
+                        }
+
+                        // Some blocks will cause death of players
+                        if (!p.level.Props[block].KillerBlock) continue;
+                        if (block == Block.Train && p.trainInvincible) continue;
+                        if (p.level.Config.KillerBlocks) p.HandleDeath(block);
+                    }
+        }
+
+        // Gets the currently visible block at a specific location
+        private static BlockID GetCurrentBlock(MapAnimation mapAnim, ushort x, ushort y, ushort z, ushort tick)
+        {
+            foreach (AnimBlock animBlock in mapAnim._blocks)
+            {
+                if (animBlock._x == x && animBlock._y == y && animBlock._z == z)
+                {
+                    return GetCurrentBlock(animBlock._loopList, tick);
+                }
+            }
+            // Return this if nothing is there
+            return System.UInt16.MaxValue;
         }
 
         // Gets the currently visible block given the tick across an array of loops. Returns 65535 if no block is visible at that frame
@@ -985,10 +1043,16 @@ namespace MCGalaxy
 
             args = (args.Where(s => !(zSynms.Contains(s) || appSynms.Contains(s) || prepSynms.Contains(s)))).ToList().ToArray();   // Keep only the non-cuboid, non-append/prepend related args
 
+            // Add the map animation if it doesn't exist
+            if (!AnimationHandler.HasAnims(p.level))
+            {
+                AnimationHandler.ConditionalAddMapAnimation(p.level);
+            }
+
             /* COMMAND SWITCH */
             switch (args.Length)
             {
-                case 1: // "/anim stop", "/anim start", "/anim delete", "/anim save", "/anim restart", "/anim info", "/anim copy", "/anim paste", "/anim reverse", "/anim cut", "/anim backup" (and just "/anim" is also considered length 1)
+                case 1: // "/anim stop", "/anim start", "/anim delete", "/anim save", "/anim restart", "/anim info", "/anim copy", "/anim paste", "/anim reverse", "/anim cut", "/anim backup", "/anim killer" (and just "/anim" is also considered length 1)
                     if (args[0] == "stop")          // "/anim stop"
                     {
                         StopAnim(p.level);
@@ -1064,13 +1128,26 @@ namespace MCGalaxy
                         AnimationsPlugin.SaveAnimationBackup(p.level);
                         p.Message("Created backup");
                     }
+                    else if (args[0] == "killer")       // "/anim killer"
+                    {
+                        if (AnimationHandler.dictActiveLevels[p.level.name].bKiller)
+                        {
+                            AnimationHandler.dictActiveLevels[p.level.name].bKiller = false;
+                            p.Message("Killer blockprops are off for animations");
+                        }
+                        else
+                        {
+                            AnimationHandler.dictActiveLevels[p.level.name].bKiller = true;
+                            p.Message("Killer blockprops are on for animations");
+                        }
+                    }
                     else
                     {
                         Help(p);
                         return;
                     }
                     break;
-                case 2: // "/anim [interval] [duration]", "/anim delete [num]", "/anim at [tick]", "/anim paste [delay]", "/anim shift [delay]", "/anim speed [ms]"
+                case 2: // "/anim [interval] [duration]", "/anim delete [num]", "/anim at [tick]", "/anim paste [delay]", "/anim shift [delay]", "/anim speed [ms]", '/anim remove all"
                     ushort interval, duration, num, tick; short delay;
                     if (ushort.TryParse(args[0], out interval) && ushort.TryParse(args[1], out duration))    // "/anim [interval] [duration]"
                     {
@@ -1132,6 +1209,8 @@ namespace MCGalaxy
                     }
                     else if (args[0] == "speed" && ushort.TryParse(args[1], out num))     // "/anim speed [ms]"
                     {
+                        if (!AnimationHandler.HasAnims(p.level)) { return; }
+
                         if (num < 50)
                         {
                             p.Message("Num cannot be less than 50");
@@ -1140,6 +1219,16 @@ namespace MCGalaxy
 
                         AnimationHandler.dictActiveLevels[p.level.name].SetSpeed(num);
                         p.Message(String.Format("Speed changed to {0}", num.ToString()));
+                    }
+                    else if (args[0] == "remove" && args[1] == "all")         // "/anim remove all"
+                    {
+                        AnimationHandler.dictActiveLevels[p.level.name]._blocks = new List<AnimBlock>();
+                        AnimationHandler.SendCurrentFrame(p.level);
+
+                        AnimationsPlugin.ConditionalDeleteAnimationFile(p.level.name);
+                        AnimationsPlugin.ConditionalDeleteAnimationConfigFile(p.level.name);
+
+                        AnimationHandler.RemoveFromActiveLevels(p.level);
                     }
                     else
                     {
@@ -1903,6 +1992,10 @@ namespace MCGalaxy
                     p.Message(@"%EFor shortcuts, see /help animation 6");
                     p.Message(@"%T/Animation speed [ms]");
                     p.Message(@"%EChange animation speed. Default is 100=1/10th of a second");
+                    p.Message(@"%T/Animation remove all");
+                    p.Message(@"%EPermanently deletes all animations on the map");
+                    p.Message(@"%T/Animation killer");
+                    p.Message(@"%EAllows animated blocks to use killer blockprops (can be slower)");
                     p.Message(@"%T/Animation backup");
                     p.Message(@"%ECreates a backup of your animation. Can only have 1 backup at a time");
                     break;
