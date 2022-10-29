@@ -12,3 +12,6 @@ A stopwatch plugin, based on Venk's own stopwatch. To be used with messageblocks
 
 <b>Animations:</b>
 Comprehensive block animations
+
+<b>Chatrooms:</b>
+An extension of teamchat, allowing for short-lived private chats
