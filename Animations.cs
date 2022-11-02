@@ -2,7 +2,6 @@
 //reference System.Core.dll
 //reference System.Xml.dll
 
-// REMEMBER TO CHANGE THE SERVER_PATH VARIABLE
 // Thanks goes out to D_Flat for suggesting the way to write the command, in a way I think is absolutely perfect
 
 using MCGalaxy.Events.LevelEvents;
@@ -114,8 +113,6 @@ namespace MCGalaxy
 
     public class AnimationsPlugin : Plugin
     {
-        public static string SERVER_PATH = @"";        // NOTE: YOU NEED TO CHANGE THIS
-
         public override string creator { get { return "Opapinguin"; } }
         public override string MCGalaxy_Version { get { return "1.9.4.0"; } }
         public override string name { get { return "Animations"; } }
@@ -198,7 +195,7 @@ namespace MCGalaxy
         {
             foreach (Level level in LevelInfo.Loaded.Items)
             {
-                if (File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name)))
+                if (File.Exists(String.Format("Animations/{0}+animation.txt", level.name)))
                 {
                     ReadAnimation(level);
                     ReadConfig(level);
@@ -274,9 +271,9 @@ namespace MCGalaxy
             List<String> animFile;
             try
             {
-                if (File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name)))
+                if (File.Exists(String.Format("Animations/{0}+animation.txt", level.name)))
                 {
-                    string[] logFile = File.ReadAllLines(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name));
+                    string[] logFile = File.ReadAllLines(String.Format("Animations/{0}+animation.txt", level.name));
                     animFile = new List<string>(logFile);
                 }
                 else
@@ -286,7 +283,7 @@ namespace MCGalaxy
             }
             catch (Exception e)
             {
-                Logger.Log(LogType.Error, String.Format("Could not read {0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name));
+                Logger.Log(LogType.Error, String.Format("Could not read Animations/{0}+animation.txt", level.name));
                 Logger.Log(LogType.Error, e.StackTrace);
                 return;
             }
@@ -316,13 +313,13 @@ namespace MCGalaxy
         // Read properties file for animations
         public static void ReadConfig(Level level)
         {
-            if (!File.Exists(String.Format("{0}/Animations/{1}+animationProps.xml", SERVER_PATH, level.name))) { return; }
+            if (!File.Exists(String.Format("Animations/{0}+animationProps.xml", level.name))) { return; }
 
             if (!AnimationHandler.HasAnims(level)) { return; }
 
             AnimConfig config;
             XmlSerializer reader = new XmlSerializer(typeof(AnimConfig));
-            using (var sww = new StreamReader(String.Format("{0}/Animations/{1}+animationProps.xml", SERVER_PATH, level.name)))
+            using (var sww = new StreamReader(String.Format("Animations/{0}+animationProps.xml", level.name)))
             {
                 config = (AnimConfig)reader.Deserialize(sww);
             }
@@ -345,7 +342,7 @@ namespace MCGalaxy
             };
 
             XmlSerializer writer = new XmlSerializer(typeof(AnimConfig));
-            using (var sw = new StreamWriter(String.Format("{0}/Animations/{1}+animationProps.xml", SERVER_PATH, level.name)))
+            using (var sw = new StreamWriter(String.Format("Animations/{0}+animationProps.xml", level.name)))
             {
                 writer.Serialize(sw, config);
                 string xml = sw.ToString();
@@ -357,10 +354,10 @@ namespace MCGalaxy
         {
             try
             {
-                if (File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, srcMap)))
+                if (File.Exists(String.Format("Animations/{0}+animation.txt", srcMap)))
                 {
-                    File.Move(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, srcMap),
-                        String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, dstMap));
+                    File.Move(String.Format("Animations/{0}+animation.txt", srcMap),
+                        String.Format("Animations/{0}+animation.txt", dstMap));
                 }
                 else
                 {
@@ -369,8 +366,8 @@ namespace MCGalaxy
             }
             catch (Exception e)
             {
-                Logger.Log(LogType.Error, String.Format("Could not copy {0}/Animations/{1}+animation.txt" +
-                    " into {0}/Animations/{2}+animation.txt", AnimationsPlugin.SERVER_PATH, srcMap, dstMap));
+                Logger.Log(LogType.Error, String.Format("Could not copy Animations/{0}+animation.txt" +
+                    " into Animations/{1}+animation.txt", srcMap, dstMap));
                 Logger.Log(LogType.Error, e.StackTrace);
                 return;
             }
@@ -381,10 +378,10 @@ namespace MCGalaxy
         {
             try
             {
-                if (File.Exists(String.Format("{0}/Animations/{1}+animationProps.xml", AnimationsPlugin.SERVER_PATH, srcMap)))
+                if (File.Exists(String.Format("Animations/{0}+animationProps.xml", srcMap)))
                 {
-                    File.Move(String.Format("{0}/Animations/{1}+animationProps.xml", AnimationsPlugin.SERVER_PATH, srcMap),
-                        String.Format("{0}/Animations/{1}+animationProps.xml", AnimationsPlugin.SERVER_PATH, dstMap));
+                    File.Move(String.Format("Animations/{0}+animationProps.xml", srcMap),
+                        String.Format("Animations/{0}+animationProps.xml", dstMap));
                 }
                 else
                 {
@@ -393,8 +390,8 @@ namespace MCGalaxy
             }
             catch (Exception e)
             {
-                Logger.Log(LogType.Error, String.Format("Could not copy {0}/Animations/{1}+animationProps.xml" +
-                    " into {0}/Animations/{2}+animationProps.xml", AnimationsPlugin.SERVER_PATH, srcMap, dstMap));
+                Logger.Log(LogType.Error, String.Format("Could not copy Animations/{0}+animationProps.xml" +
+                    " into Animations/{1}+animationProps.xml", srcMap, dstMap));
                 Logger.Log(LogType.Error, e.StackTrace);
                 return;
             }
@@ -430,7 +427,7 @@ namespace MCGalaxy
                 }
             }
 
-            File.WriteAllLines(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name), lines.ToArray());
+            File.WriteAllLines(String.Format("Animations/{0}+animation.txt", level.name), lines.ToArray());
         }
 
         // Write the animation thus far to [level]+animation.txt in ./AnimationsBackup  TODO: Repetition of code, but not sure of an abstract is necessary here
@@ -463,7 +460,7 @@ namespace MCGalaxy
                 }
             }
 
-            File.WriteAllLines(String.Format("{0}/AnimationsBackup/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level.name), lines.ToArray());
+            File.WriteAllLines(String.Format("AnimationsBackup/{0}+animation.txt", level.name), lines.ToArray());
         }
 
         // Deletes the animation file [level]+animation.txt in ./Animations if it exists
@@ -473,11 +470,11 @@ namespace MCGalaxy
             {
                 try
                 {
-                    File.Delete(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level));
+                    File.Delete(String.Format("Animations/{0}+animation.txt", level));
                 }
                 catch (Exception e)
                 {
-                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"{0}/Animations/{1}+animation.txt\"", AnimationsPlugin.SERVER_PATH, level));
+                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"Animations/{0}+animation.txt\"", level));
                     Logger.Log(LogType.Error, e.StackTrace);
                 }
             }
@@ -491,11 +488,11 @@ namespace MCGalaxy
             {
                 try
                 {
-                    File.Delete(String.Format("{0}/Animations/{1}+animationProps.xml", AnimationsPlugin.SERVER_PATH, level));
+                    File.Delete(String.Format("Animations/{0}+animationProps.xml", level));
                 }
                 catch (Exception e)
                 {
-                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"{0}/Animations/{1}+animationProps.xml\"", AnimationsPlugin.SERVER_PATH, level));
+                    Logger.Log(LogType.Error, String.Format("Failed to delete file \"Animations/{0}+animationProps.xml\"", level));
                     Logger.Log(LogType.Error, e.StackTrace);
                 }
             }
@@ -504,7 +501,7 @@ namespace MCGalaxy
         // Checks if [level]+animations.txt exists in ./Animations
         public static bool AnimationExists(string level)
         {
-            return File.Exists(String.Format("{0}/Animations/{1}+animation.txt", AnimationsPlugin.SERVER_PATH, level));
+            return File.Exists(String.Format("Animations/{0}+animation.txt", level));
         }
 
     }
