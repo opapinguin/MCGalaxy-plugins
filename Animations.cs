@@ -1379,6 +1379,12 @@ namespace MCGalaxy
         // Once a block is placed this is called. See the definition of AnimationArgs (above) for state members
         private bool PlacedMark(Player p, Vec3S32[] marks, object state, BlockID block)
         {
+            if (!p.level.BuildAccess.CheckAllowed(p))
+            {
+                p.Message("You do not have permissions to use animations on this level.");
+                return;
+            }
+        
             ushort x = (ushort)marks[0].X, y = (ushort)marks[0].Y, z = (ushort)marks[0].Z;
             ushort x2 = 0, y2 = 0, z2 = 0;
             if (marks.Length > 1)
