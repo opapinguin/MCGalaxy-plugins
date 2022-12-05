@@ -1382,7 +1382,7 @@ namespace MCGalaxy
             if (!p.level.BuildAccess.CheckAllowed(p))
             {
                 p.Message("You do not have permissions to use animations on this level.");
-                return;
+                return true;
             }
         
             ushort x = (ushort)marks[0].X, y = (ushort)marks[0].Y, z = (ushort)marks[0].Z;
