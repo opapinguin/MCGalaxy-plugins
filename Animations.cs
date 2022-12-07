@@ -225,7 +225,6 @@ namespace MCGalaxy
         {
             SaveAnimation(level);
             SaveConfig(level);
-            level.Message("Animations saved");
         }
         private void HandleLevelLoaded(Level level)
         {
